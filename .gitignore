@@ -31,3 +31,8 @@ vendor/
 tmp/
 dist/
 *.log
+
+# mongo-loadtest run artifacts (keep directory via .gitkeep)
+/apps/mongo-loadtest/results/loadtest-*.json
+/apps/mongo-loadtest/results/loadtest-*.md
+/apps/mongo-loadtest/bin/
