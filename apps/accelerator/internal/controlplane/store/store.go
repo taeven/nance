@@ -16,6 +16,12 @@ var (
 	ErrNotFound = errors.New("not found")
 )
 
+// TokenHashRow is used by the data-plane proxy to validate raw tokens via bcrypt.
+type TokenHashRow struct {
+	ID        string
+	TokenHash string
+}
+
 // Store is the interface for control plane persistence.
 type Store interface {
 	// Tenants
@@ -36,6 +42,8 @@ type Store interface {
 	CreateToken(ctx context.Context, tok *model.Token, tokenHash string) error
 	GetTokenByID(ctx context.Context, id string) (*model.Token, error)
 	ListTokensForTenant(ctx context.Context, tenantID string) ([]*model.Token, error)
+	// ListActiveTokenHashes returns id+hash for non-revoked, non-expired tokens of a tenant (proxy auth).
+	ListActiveTokenHashes(ctx context.Context, tenantID string) ([]TokenHashRow, error)
 	RevokeToken(ctx context.Context, id string) error
 
 	// Audit (best effort)
@@ -274,6 +282,30 @@ func (s *PostgresStore) ListTokensForTenant(ctx context.Context, tenantID string
 			t.RevokedAt = &revoked.Time
 		}
 		out = append(out, &t)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) ListActiveTokenHashes(ctx context.Context, tenantID string) ([]TokenHashRow, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, token_hash
+		FROM tokens
+		WHERE tenant_id = $1
+		  AND revoked_at IS NULL
+		  AND (expires_at IS NULL OR expires_at > NOW())
+	`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []TokenHashRow
+	for rows.Next() {
+		var r TokenHashRow
+		if err := rows.Scan(&r.ID, &r.TokenHash); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }

@@ -1,0 +1,8 @@
+bin/
+controlplane
+*.md
+.git/
+.github/
+scripts/
+docker-compose.yml
+**/*_test.go

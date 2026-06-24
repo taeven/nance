@@ -1,16 +1,29 @@
-.PHONY: build run dev-up dev-down seed test test-integration lint
+.PHONY: build build-proxy run run-proxy dev-up dev-down seed test test-integration lint
+
+export NANCE_MASTER_KEY ?= thisisexactly32byteslongforaes256!!
 
 build:
 	go build -o bin/controlplane ./cmd/controlplane
 
+build-proxy:
+	go build -o bin/proxy ./cmd/proxy
+
+build-all: build build-proxy
+
 run: build
 	./bin/controlplane
+
+# Data-plane proxy (Phase 1). Listens on :27018 by default (compose Mongo owns :27017).
+run-proxy: build-proxy
+	./bin/proxy
 
 # Start local infra (Postgres + Mongo + Redis)
 dev-up:
 	docker compose up -d --wait
 	@echo "Postgres, Mongo and Redis are up."
-	@echo "Now run 'make seed' (after the control plane is running) or start the controlplane with make run."
+	@echo "Start control plane: make run"
+	@echo "Start proxy:         make run-proxy"
+	@echo "Then seed:           make seed"
 
 dev-down:
 	docker compose down -v
@@ -46,7 +59,10 @@ seed:
 		-H "Authorization: Bearer $${NANCE_ADMIN_TOKEN:-dev}" \
 		-d '{"description":"local dev token"}' | cat
 
-	@echo "\n\nDone. Use the rawToken with mongodb+nance://demo:<rawToken>@127.0.0.1:27017/mydb (in Phase 1+)."
+	@echo "\n\nDone. Connect through the proxy (default :27018) with PLAIN auth:"
+	@echo '  mongodb://demo:<rawToken>@127.0.0.1:27018/mydb?authMechanism=PLAIN&authSource=$$external'
+	@echo "Or with the nance scheme (drivers treat it like mongodb:// if you rewrite the scheme):"
+	@echo '  mongodb+nance://demo:<rawToken>@127.0.0.1:27018/mydb?authMechanism=PLAIN&authSource=$$external'
 
 test:
 	go test ./...
