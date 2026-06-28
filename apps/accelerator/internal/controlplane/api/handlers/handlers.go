@@ -13,6 +13,13 @@ import (
 	"github.com/taeven/nance/accelerator/internal/model"
 )
 
+// PlatformPublic is JSON-safe instance metadata for self-hosters (no secrets).
+type PlatformPublic struct {
+	InviteOnly          bool `json:"inviteOnly"`
+	AllowOrgCreation    bool `json:"allowOrgCreation"`
+	AllowAdminBootstrap bool `json:"allowAdminBootstrap"`
+}
+
 type Handlers struct {
 	tenants  *service.TenantService
 	backends *service.BackendService
@@ -20,6 +27,7 @@ type Handlers struct {
 	tokens   *service.TokenService
 	auth     *service.AuthService
 	orgs     *service.OrgService
+	platform PlatformPublic
 }
 
 func NewHandlers(
@@ -29,7 +37,13 @@ func NewHandlers(
 	toks *service.TokenService,
 	auth *service.AuthService,
 	orgs *service.OrgService,
+	platform PlatformPublic,
 ) *Handlers {
+	if orgs != nil && orgs.InviteOnly() {
+		platform.InviteOnly = true
+		platform.AllowOrgCreation = false
+	}
+	platform.AllowAdminBootstrap = true
 	return &Handlers{
 		tenants:  ts,
 		backends: bs,
@@ -37,7 +51,13 @@ func NewHandlers(
 		tokens:   toks,
 		auth:     auth,
 		orgs:     orgs,
+		platform: platform,
 	}
+}
+
+// GetPlatformSettings returns public instance configuration for the dashboard.
+func (h *Handlers) GetPlatformSettings(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, h.platform)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -58,7 +78,7 @@ func bearerToken(r *http.Request) string {
 	return strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
 }
 
-// ensureTenantAccess checks platform admin or org membership.
+// ensureTenantAccess checks platform admin or org membership (read-only for members).
 func (h *Handlers) ensureTenantAccess(r *http.Request, tenantID string) error {
 	if cpauth.IsPlatformAdmin(r.Context()) {
 		return nil
@@ -71,6 +91,7 @@ func (h *Handlers) ensureTenantAccess(r *http.Request, tenantID string) error {
 	return err
 }
 
+// ensureTenantAdmin requires owner or admin (manage settings; not delete org).
 func (h *Handlers) ensureTenantAdmin(r *http.Request, tenantID string) error {
 	if cpauth.IsPlatformAdmin(r.Context()) {
 		return nil
@@ -83,10 +104,36 @@ func (h *Handlers) ensureTenantAdmin(r *http.Request, tenantID string) error {
 	return err
 }
 
+// ensureTenantOwner requires owner role (delete organization).
+func (h *Handlers) ensureTenantOwner(r *http.Request, tenantID string) error {
+	if cpauth.IsPlatformAdmin(r.Context()) {
+		return nil
+	}
+	u := cpauth.UserFromContext(r.Context())
+	if u == nil {
+		return service.ErrUnauthorized
+	}
+	_, err := h.orgs.RequireOwner(r.Context(), tenantID, u.ID)
+	return err
+}
+
+func (h *Handlers) actorMembership(r *http.Request, tenantID string) (*model.OrganizationMember, error) {
+	if cpauth.IsPlatformAdmin(r.Context()) && cpauth.UserFromContext(r.Context()) == nil {
+		return &model.OrganizationMember{TenantID: tenantID, Role: model.RoleOwner}, nil
+	}
+	u := cpauth.UserFromContext(r.Context())
+	if u == nil {
+		return nil, service.ErrUnauthorized
+	}
+	return h.orgs.RequireMember(r.Context(), tenantID, u.ID)
+}
+
 func mapAuthErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, service.ErrUnauthorized):
 		writeError(w, http.StatusUnauthorized, err.Error())
+	case errors.Is(err, service.ErrOrgCreationDisabled):
+		writeError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, service.ErrForbidden), errors.Is(err, service.ErrNotMember):
 		writeError(w, http.StatusForbidden, "forbidden")
 	case errors.Is(err, service.ErrInvalidEmail), errors.Is(err, service.ErrInvalidCode),
@@ -209,7 +256,7 @@ func (h *Handlers) CreateMyOrganization(w http.ResponseWriter, r *http.Request) 
 	}
 	org, err := h.orgs.CreateOrganization(r.Context(), u.ID, req.ID, req.Name)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		mapAuthErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, org)
@@ -264,12 +311,13 @@ func (h *Handlers) CreateTenant(w http.ResponseWriter, r *http.Request) {
 		}
 		org, err := h.orgs.CreateOrganization(r.Context(), u.ID, req.ID, req.Name)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			mapAuthErr(w, err)
 			return
 		}
 		writeJSON(w, http.StatusCreated, &org.Tenant)
 		return
 	}
+	// Platform admin (NANCE_ADMIN_TOKEN): always allowed — bootstrap first org on invite-only instances
 	var req struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
@@ -301,7 +349,20 @@ func (h *Handlers) GetTenant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, t)
+	// Include caller's role for UI permission gates
+	out := map[string]any{
+		"id":         t.ID,
+		"name":       t.Name,
+		"status":     t.Status,
+		"created_at": t.CreatedAt,
+		"updated_at": t.UpdatedAt,
+	}
+	if m, err := h.actorMembership(r, id); err == nil && m != nil {
+		out["role"] = m.Role
+		out["canManage"] = service.CanManageSettings(m.Role)
+		out["canDelete"] = m.Role == model.RoleOwner || cpauth.IsPlatformAdmin(r.Context())
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (h *Handlers) ListTenants(w http.ResponseWriter, r *http.Request) {
@@ -375,10 +436,14 @@ func (h *Handlers) InviteMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := "admin"
+	actorRole := model.RoleOwner
 	if u := cpauth.UserFromContext(r.Context()); u != nil {
 		actor = u.ID
+		if m, err := h.orgs.RequireMember(r.Context(), tenantID, u.ID); err == nil {
+			actorRole = m.Role
+		}
 	}
-	inv, err := h.orgs.InviteMember(r.Context(), tenantID, actor, req.Email, model.MemberRole(req.Role))
+	inv, err := h.orgs.InviteMember(r.Context(), tenantID, actor, req.Email, model.MemberRole(req.Role), actorRole)
 	if err != nil {
 		mapAuthErr(w, err)
 		return
@@ -428,14 +493,66 @@ func (h *Handlers) RemoveMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actor := "admin"
+	actorRole := model.RoleOwner
 	if u := cpauth.UserFromContext(r.Context()); u != nil {
 		actor = u.ID
+		if m, err := h.orgs.RequireMember(r.Context(), tenantID, u.ID); err == nil {
+			actorRole = m.Role
+		}
 	}
-	if err := h.orgs.RemoveMember(r.Context(), tenantID, actor, userID); err != nil {
+	if err := h.orgs.RemoveMember(r.Context(), tenantID, actor, userID, actorRole); err != nil {
 		mapAuthErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// RequestDeleteOrganization emails a verification code to the owner.
+func (h *Handlers) RequestDeleteOrganization(w http.ResponseWriter, r *http.Request) {
+	tenantID := chi.URLParam(r, "tenantId")
+	u := cpauth.UserFromContext(r.Context())
+	if u == nil && !cpauth.IsPlatformAdmin(r.Context()) {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	// Platform admin without user session cannot receive email — require owner session.
+	if u == nil {
+		writeError(w, http.StatusBadRequest, "sign in as an organization owner to delete (email verification required)")
+		return
+	}
+	if err := h.orgs.RequestDeleteOrganization(r.Context(), tenantID, u); err != nil {
+		mapAuthErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":  "ok",
+		"message": "A verification code was sent to your email. Enter it to permanently delete this organization.",
+	})
+}
+
+// ConfirmDeleteOrganization verifies the code and deletes the org and all related data.
+func (h *Handlers) ConfirmDeleteOrganization(w http.ResponseWriter, r *http.Request) {
+	tenantID := chi.URLParam(r, "tenantId")
+	u := cpauth.UserFromContext(r.Context())
+	if u == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var req struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if err := h.orgs.ConfirmDeleteOrganization(r.Context(), tenantID, u, req.Code); err != nil {
+		mapAuthErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":  "deleted",
+		"message": "Organization and all related data have been permanently removed",
+	})
 }
 
 // ===== Backend handlers =====

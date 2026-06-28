@@ -4,6 +4,10 @@ export interface Tenant {
   status: string
   created_at: string
   updated_at: string
+  /** Caller's role in this org (from GET tenant) */
+  role?: MemberRole
+  canManage?: boolean
+  canDelete?: boolean
 }
 
 export interface User {
@@ -101,4 +105,10 @@ export interface SavingsReport {
   tenantId: string
   note?: string
   suggestedQueries?: string[]
+}
+
+export interface PlatformSettings {
+  inviteOnly: boolean
+  allowOrgCreation: boolean
+  allowAdminBootstrap: boolean
 }

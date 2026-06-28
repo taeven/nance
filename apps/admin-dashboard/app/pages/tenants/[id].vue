@@ -14,16 +14,27 @@ const route = useRoute()
 const api = useAcceleratorApi()
 const tenantId = computed(() => String(route.params.id || ''))
 
-const tab = ref<'overview' | 'backend' | 'cache' | 'tokens' | 'members' | 'invalidate' | 'savings'>('overview')
-const tabs = [
-  { id: 'overview' as const, label: 'Overview' },
-  { id: 'backend' as const, label: 'Connection' },
-  { id: 'cache' as const, label: 'Caching' },
-  { id: 'tokens' as const, label: 'Tokens' },
-  { id: 'members' as const, label: 'Members' },
-  { id: 'invalidate' as const, label: 'Invalidate' },
-  { id: 'savings' as const, label: 'Savings' },
-]
+const tab = ref<'overview' | 'backend' | 'cache' | 'tokens' | 'members' | 'invalidate' | 'savings' | 'danger'>('overview')
+const tabs = computed(() => {
+  const base = [
+    { id: 'overview' as const, label: 'Overview' },
+    { id: 'backend' as const, label: 'Connection' },
+    { id: 'cache' as const, label: 'Caching' },
+    { id: 'tokens' as const, label: 'Tokens' },
+    { id: 'members' as const, label: 'Members' },
+    { id: 'invalidate' as const, label: 'Invalidate' },
+    { id: 'savings' as const, label: 'Savings' },
+  ]
+  if (canDelete.value) {
+    base.push({ id: 'danger' as const, label: 'Danger zone' })
+  }
+  return base
+})
+
+const myRole = computed(() => tenant.value?.role || 'member')
+const canManage = computed(() => tenant.value?.canManage === true || myRole.value === 'owner' || myRole.value === 'admin')
+const canDelete = computed(() => tenant.value?.canDelete === true || myRole.value === 'owner')
+const isReadOnly = computed(() => !canManage.value)
 
 const tenant = ref<Tenant | null>(null)
 const policy = ref<CachePolicy | null>(null)
@@ -64,6 +75,26 @@ const pendingInvites = ref<OrganizationInvite[]>([])
 const inviteEmail = ref('')
 const inviteRole = ref<'member' | 'admin' | 'owner'>('member')
 const membersBusy = ref(false)
+
+// Delete org (owner only)
+const deleteStep = ref<'warn' | 'code'>('warn')
+const deleteCode = ref('')
+const deleteBusy = ref(false)
+const deleteAck = ref(false)
+
+const inviteRoleOptions = computed(() => {
+  if (myRole.value === 'owner') {
+    return [
+      { value: 'member', label: 'member (read-only)' },
+      { value: 'admin', label: 'admin (manage settings)' },
+      { value: 'owner', label: 'owner (full control)' },
+    ]
+  }
+  return [
+    { value: 'member', label: 'member (read-only)' },
+    { value: 'admin', label: 'admin (manage settings)' },
+  ]
+})
 
 function showFlash(type: 'success' | 'error' | 'info' | 'warning', msg: string) {
   flash.value = { type, msg }
@@ -344,6 +375,10 @@ function copyText(text: string) {
 
 // —— Invalidate ——
 async function runInvalidate() {
+  if (!canManage.value) {
+    showFlash('error', 'Only admins and owners can invalidate cache')
+    return
+  }
   invBusy.value = true
   try {
     const tags = invTags.value
@@ -364,6 +399,45 @@ async function runInvalidate() {
     invBusy.value = false
   }
 }
+
+// —— Delete organization (owner) ——
+async function sendDeleteCode() {
+  if (!deleteAck.value) {
+    showFlash('error', 'Confirm that you understand data will be permanently lost')
+    return
+  }
+  deleteBusy.value = true
+  try {
+    const res = await api.requestDeleteOrg(tenantId.value)
+    deleteStep.value = 'code'
+    showFlash('info', (res as { message?: string }).message || 'Verification code sent to your email')
+  }
+  catch (e) {
+    showFlash('error', api.apiErrorMessage(e))
+  }
+  finally {
+    deleteBusy.value = false
+  }
+}
+
+async function confirmDeleteOrg() {
+  if (!deleteCode.value.trim()) {
+    showFlash('error', 'Enter the verification code from your email')
+    return
+  }
+  deleteBusy.value = true
+  try {
+    await api.confirmDeleteOrg(tenantId.value, deleteCode.value.trim())
+    showFlash('success', 'Organization deleted')
+    await navigateTo('/')
+  }
+  catch (e) {
+    showFlash('error', api.apiErrorMessage(e))
+  }
+  finally {
+    deleteBusy.value = false
+  }
+}
 </script>
 
 <template>
@@ -379,7 +453,10 @@ async function runInvalidate() {
         <h2>{{ tenant?.name || tenantId }}</h2>
         <p class="subtitle">Organization · <span class="mono">{{ tenantId }}</span></p>
       </div>
-      <span v-if="tenant" :class="statusBadgeClass(tenant.status)">{{ tenant.status }}</span>
+      <div class="header-badges">
+        <span v-if="tenant?.role" class="badge role-badge">your role: {{ tenant.role }}</span>
+        <span v-if="tenant" :class="statusBadgeClass(tenant.status)">{{ tenant.status }}</span>
+      </div>
     </div>
 
     <div v-if="flash" class="alert" :class="`alert-${flash.type}`">{{ flash.msg }}</div>
@@ -387,13 +464,20 @@ async function runInvalidate() {
     <div v-if="loading" class="loading">Loading tenant…</div>
 
     <template v-else-if="tenant">
+      <div v-if="isReadOnly" class="alert alert-info role-banner">
+        You are a <strong>member</strong> — view-only access. Admins manage settings; only an <strong>owner</strong> can delete the organization.
+      </div>
+      <div v-else-if="myRole === 'admin'" class="alert alert-info role-banner">
+        You are an <strong>admin</strong> — you can manage backends, caching, tokens, and members. Only an <strong>owner</strong> can delete this organization.
+      </div>
+
       <div class="tabs">
         <button
           v-for="t in tabs"
           :key="t.id"
           type="button"
           class="tab"
-          :class="{ active: tab === t.id }"
+          :class="{ active: tab === t.id, 'tab-danger': t.id === 'danger' }"
           @click="tab = t.id"
         >
           {{ t.label }}
@@ -435,11 +519,12 @@ async function runInvalidate() {
           <li>Writes to <code class="mono">orders</code> invalidate cached entries for that namespace</li>
         </ul>
         <div class="form-actions">
-          <button class="btn btn-secondary" type="button" @click="tab = 'backend'">Configure backend</button>
-          <button class="btn btn-secondary" type="button" @click="tab = 'cache'">Configure caching</button>
-          <button class="btn btn-secondary" type="button" @click="tab = 'tokens'">Issue token</button>
-          <button class="btn btn-secondary" type="button" @click="tab = 'members'">Manage members</button>
-          <button class="btn btn-secondary" type="button" @click="tab = 'invalidate'">Invalidate cache</button>
+          <button class="btn btn-secondary" type="button" @click="tab = 'backend'">{{ canManage ? 'Configure backend' : 'View connection' }}</button>
+          <button class="btn btn-secondary" type="button" @click="tab = 'cache'">{{ canManage ? 'Configure caching' : 'View caching' }}</button>
+          <button v-if="canManage" class="btn btn-secondary" type="button" @click="tab = 'tokens'">Issue token</button>
+          <button class="btn btn-secondary" type="button" @click="tab = 'members'">{{ canManage ? 'Manage members' : 'View members' }}</button>
+          <button v-if="canManage" class="btn btn-secondary" type="button" @click="tab = 'invalidate'">Invalidate cache</button>
+          <button v-if="canDelete" class="btn btn-danger" type="button" @click="tab = 'danger'">Delete organization</button>
         </div>
       </div>
 
@@ -449,6 +534,7 @@ async function runInvalidate() {
         <p class="card-desc">
           Store this organization's real MongoDB URI. It is encrypted at rest with
           <code class="mono">NANCE_MASTER_KEY</code> and never returned by the API.
+          <span v-if="isReadOnly"> Members can test connectivity but cannot change the URI.</span>
         </p>
         <div class="form-row">
           <label for="backend-uri">Connection URI</label>
@@ -459,11 +545,12 @@ async function runInvalidate() {
             type="password"
             placeholder="mongodb://user:pass@host:27017/db?…"
             autocomplete="off"
+            :disabled="isReadOnly"
           >
           <span class="hint">Paste a full MongoDB connection string. Leave blank and use Test if already configured.</span>
         </div>
         <div class="form-actions">
-          <button class="btn btn-primary" type="button" :disabled="backendBusy" @click="saveBackend">
+          <button v-if="canManage" class="btn btn-primary" type="button" :disabled="backendBusy" @click="saveBackend">
             {{ backendBusy ? 'Saving…' : 'Save encrypted URI' }}
           </button>
           <button class="btn btn-secondary" type="button" :disabled="backendBusy" @click="testBackend">
@@ -503,12 +590,19 @@ async function runInvalidate() {
           <div class="inline-form">
             <div class="form-row">
               <label for="default-ttl">Default TTL (seconds)</label>
-              <input id="default-ttl" v-model.number="defaultTtl" type="number" min="1" step="1">
+              <input id="default-ttl" v-model.number="defaultTtl" type="number" min="1" step="1" :disabled="isReadOnly">
               <span class="hint">Example: 60 caches results for one minute after each miss.</span>
             </div>
-            <button class="btn btn-primary" type="button" :disabled="defaultsBusy" @click="saveDefaults">
+            <button
+              v-if="canManage"
+              class="btn btn-primary"
+              type="button"
+              :disabled="defaultsBusy || isReadOnly"
+              @click="saveDefaults"
+            >
               {{ defaultsBusy ? 'Saving…' : 'Save default TTL' }}
             </button>
+            <p v-else class="text-sm text-muted">Only admins and owners can change TTL settings.</p>
           </div>
           <p v-if="policy" class="text-dim text-sm mt-2">
             Active default: <strong>{{ policy.defaultTtlSeconds }}s</strong>
@@ -565,31 +659,33 @@ async function runInvalidate() {
             </table>
           </div>
 
-          <h4 class="text-sm text-muted mb-1" style="font-weight: 600;">Add / update override</h4>
-          <div class="inline-form">
-            <div class="form-row">
-              <label>Real db.collection</label>
-              <input v-model="newCollKey" class="mono" placeholder="mydb.orders">
-              <span class="hint">Not <code class="mono">mydb.orders_cache</code></span>
+          <template v-if="canManage">
+            <h4 class="text-sm text-muted mb-1" style="font-weight: 600;">Add / update override</h4>
+            <div class="inline-form">
+              <div class="form-row">
+                <label>Real db.collection</label>
+                <input v-model="newCollKey" class="mono" placeholder="mydb.orders">
+                <span class="hint">Not <code class="mono">mydb.orders_cache</code></span>
+              </div>
+              <div class="form-row">
+                <label>TTL (s)</label>
+                <input v-model.number="newCollTtl" type="number" min="1" style="max-width: 100px;" :placeholder="String(defaultTtl)">
+              </div>
+              <div class="form-row">
+                <label>Max bytes (optional)</label>
+                <input v-model.number="newCollMaxBytes" type="number" min="1" style="max-width: 120px;" placeholder="1048576">
+              </div>
+              <button class="btn btn-primary" type="button" :disabled="collBusy" @click="addCollection">
+                Save override
+              </button>
             </div>
-            <div class="form-row">
-              <label>TTL (s)</label>
-              <input v-model.number="newCollTtl" type="number" min="1" style="max-width: 100px;" :placeholder="String(defaultTtl)">
-            </div>
-            <div class="form-row">
-              <label>Max bytes (optional)</label>
-              <input v-model.number="newCollMaxBytes" type="number" min="1" style="max-width: 120px;" placeholder="1048576">
-            </div>
-            <button class="btn btn-primary" type="button" :disabled="collBusy" @click="addCollection">
-              Save override
-            </button>
-          </div>
+          </template>
         </div>
       </template>
 
       <!-- Tokens -->
       <template v-if="tab === 'tokens'">
-        <div class="card">
+        <div v-if="canManage" class="card">
           <h3 class="card-title">Issue access token</h3>
           <p class="card-desc">
             Tokens authenticate clients to the data-plane proxy (username = tenant ID, password = raw token,
@@ -621,6 +717,9 @@ async function runInvalidate() {
               </button>
             </div>
           </div>
+        </div>
+        <div v-else class="card">
+          <p class="card-desc">Members can list tokens but only admins and owners can issue or revoke them.</p>
         </div>
 
         <div class="card">
@@ -668,26 +767,32 @@ async function runInvalidate() {
       <!-- Members -->
       <div v-if="tab === 'members'" class="card">
         <h3 class="card-title">User management</h3>
-        <p class="card-desc">Invite teammates by email. They sign in with the same email and accept the invite from Organizations.</p>
-        <div class="grid-2" style="align-items: end;">
-          <div class="form-row">
-            <label>Email</label>
-            <input v-model="inviteEmail" type="email" placeholder="teammate@company.com">
+        <p class="card-desc">
+          <strong>member</strong> — read-only.
+          <strong>admin</strong> — manage settings (not delete org).
+          <strong>owner</strong> — full control including deletion.
+          Invitees sign in with the invited email and accept from Organizations.
+        </p>
+        <template v-if="canManage">
+          <div class="grid-2" style="align-items: end;">
+            <div class="form-row">
+              <label>Email</label>
+              <input v-model="inviteEmail" type="email" placeholder="teammate@company.com">
+            </div>
+            <div class="form-row">
+              <label>Role</label>
+              <select v-model="inviteRole">
+                <option v-for="opt in inviteRoleOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+              </select>
+            </div>
           </div>
-          <div class="form-row">
-            <label>Role</label>
-            <select v-model="inviteRole">
-              <option value="member">member</option>
-              <option value="admin">admin</option>
-              <option value="owner">owner</option>
-            </select>
+          <div class="form-actions">
+            <button class="btn btn-primary" type="button" :disabled="membersBusy || !inviteEmail.trim()" @click="sendInvite">
+              {{ membersBusy ? 'Working…' : 'Send invite' }}
+            </button>
           </div>
-        </div>
-        <div class="form-actions">
-          <button class="btn btn-primary" type="button" :disabled="membersBusy || !inviteEmail.trim()" @click="sendInvite">
-            {{ membersBusy ? 'Working…' : 'Send invite' }}
-          </button>
-        </div>
+        </template>
+        <p v-else class="text-sm text-muted">Members cannot invite or remove users.</p>
 
         <h4 class="mt-3">Members</h4>
         <div class="table-wrap">
@@ -706,7 +811,13 @@ async function runInvalidate() {
                 <td>{{ m.name || '—' }}</td>
                 <td><span class="badge">{{ m.role }}</span></td>
                 <td>
-                  <button class="btn btn-danger btn-sm" type="button" :disabled="membersBusy" @click="onRemoveMember(m.userId)">
+                  <button
+                    v-if="canManage"
+                    class="btn btn-danger btn-sm"
+                    type="button"
+                    :disabled="membersBusy"
+                    @click="onRemoveMember(m.userId)"
+                  >
                     Remove
                   </button>
                 </td>
@@ -715,7 +826,7 @@ async function runInvalidate() {
           </table>
         </div>
 
-        <template v-if="pendingInvites.length">
+        <template v-if="pendingInvites.length && canManage">
           <h4 class="mt-3">Pending invites</h4>
           <div class="table-wrap">
             <table class="data-table">
@@ -744,6 +855,50 @@ async function runInvalidate() {
         </template>
       </div>
 
+      <!-- Danger zone: delete org (owner only) -->
+      <div v-if="tab === 'danger' && canDelete" class="card danger-card">
+        <h3 class="card-title">Delete organization</h3>
+        <p class="card-desc">
+          Permanently remove <strong>{{ tenant?.name }}</strong> (<code class="mono">{{ tenantId }}</code>) and
+          <strong>all related data</strong>: members, invites, backend connection, cache policies, proxy tokens, and audit history.
+          This cannot be undone. Only <strong>owners</strong> can delete an organization.
+        </p>
+
+        <div v-if="deleteStep === 'warn'" class="danger-steps">
+          <label class="ack-row">
+            <input v-model="deleteAck" type="checkbox">
+            <span>I understand that all organization data will be permanently lost and cannot be recovered.</span>
+          </label>
+          <button
+            class="btn btn-danger"
+            type="button"
+            :disabled="deleteBusy || !deleteAck"
+            @click="sendDeleteCode"
+          >
+            {{ deleteBusy ? 'Sending…' : 'Send verification code to my email' }}
+          </button>
+          <p class="hint">We will email a 6-digit code to your account address. Enter it on the next step to confirm deletion.</p>
+        </div>
+
+        <div v-else class="danger-steps">
+          <p class="alert alert-warning">
+            Check your email for the verification code (also in control plane logs in dev). Enter it below to delete this organization forever.
+          </p>
+          <div class="form-row">
+            <label>Verification code</label>
+            <input v-model="deleteCode" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="123456">
+          </div>
+          <div class="form-actions">
+            <button class="btn btn-ghost" type="button" :disabled="deleteBusy" @click="deleteStep = 'warn'; deleteCode = ''">
+              Back
+            </button>
+            <button class="btn btn-danger" type="button" :disabled="deleteBusy || !deleteCode.trim()" @click="confirmDeleteOrg">
+              {{ deleteBusy ? 'Deleting…' : 'Permanently delete organization' }}
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- Invalidate -->
       <div v-if="tab === 'invalidate'" class="card">
         <h3 class="card-title">Explicit cache invalidation</h3>
@@ -768,9 +923,16 @@ async function runInvalidate() {
           <input v-model="invTags" class="mono" placeholder="user:1, order:99">
         </div>
         <div class="form-actions">
-          <button class="btn btn-danger" type="button" :disabled="invBusy" @click="runInvalidate">
+          <button
+            v-if="canManage"
+            class="btn btn-danger"
+            type="button"
+            :disabled="invBusy"
+            @click="runInvalidate"
+          >
             {{ invBusy ? 'Invalidating…' : 'Invalidate cache' }}
           </button>
+          <p v-else class="text-sm text-muted">Only admins and owners can invalidate cache.</p>
         </div>
       </div>
 
@@ -821,4 +983,21 @@ async function runInvalidate() {
   border: 1px solid var(--border-subtle, #1a2433);
 }
 .code-example code { font-size: 0.82rem; }
+.header-badges { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.role-badge { text-transform: none; font-weight: 500; }
+.role-banner { margin-bottom: 1rem; }
+.tab-danger { color: var(--danger, #f87171) !important; }
+.danger-card {
+  border-color: rgba(248, 113, 113, 0.45);
+  background: linear-gradient(135deg, rgba(248, 113, 113, 0.08), transparent);
+}
+.danger-steps { display: flex; flex-direction: column; gap: 0.85rem; margin-top: 0.5rem; }
+.ack-row {
+  display: flex;
+  gap: 0.65rem;
+  align-items: flex-start;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+.ack-row input { margin-top: 0.2rem; }
 </style>

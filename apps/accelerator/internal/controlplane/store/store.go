@@ -29,6 +29,8 @@ type Store interface {
 	CreateTenant(ctx context.Context, t *model.Tenant) error
 	GetTenant(ctx context.Context, id string) (*model.Tenant, error)
 	ListTenants(ctx context.Context) ([]*model.Tenant, error)
+	// DeleteTenant removes the tenant row; child tables cascade via FK.
+	DeleteTenant(ctx context.Context, id string) error
 
 	// Backends (encrypted)
 	SetBackend(ctx context.Context, tenantID string, ciphertext, nonce []byte, dekVersion string) error
@@ -160,6 +162,17 @@ func (s *PostgresStore) ListTenants(ctx context.Context) ([]*model.Tenant, error
 		out = append(out, &t)
 	}
 	return out, rows.Err()
+}
+
+func (s *PostgresStore) DeleteTenant(ctx context.Context, id string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ===== Backends =====

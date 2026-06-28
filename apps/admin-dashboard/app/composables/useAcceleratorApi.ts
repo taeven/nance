@@ -13,6 +13,7 @@ import type {
   Tenant,
   Token,
   User,
+  PlatformSettings,
 } from '~/types/accelerator'
 
 function apiErrorMessage(err: unknown): string {
@@ -30,6 +31,10 @@ function authHeaders(): Record<string, string> {
 }
 
 export function useAcceleratorApi() {
+  async function getPlatformSettings() {
+    return $fetch<PlatformSettings>('/api/platform')
+  }
+
   async function requestCode(email: string) {
     return $fetch<StatusResponse>('/api/auth/request-code', {
       method: 'POST',
@@ -136,6 +141,21 @@ export function useAcceleratorApi() {
     )
   }
 
+  async function requestDeleteOrg(tenantId: string) {
+    return $fetch<StatusResponse>(`/api/tenants/${encodeURIComponent(tenantId)}/delete/request-code`, {
+      method: 'POST',
+      headers: authHeaders(),
+    })
+  }
+
+  async function confirmDeleteOrg(tenantId: string, code: string) {
+    return $fetch<StatusResponse>(`/api/tenants/${encodeURIComponent(tenantId)}/delete/confirm`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: { code },
+    })
+  }
+
   async function setBackend(tenantId: string, uri: string) {
     return $fetch<StatusResponse>(`/api/tenants/${encodeURIComponent(tenantId)}/backend`, {
       method: 'POST',
@@ -212,6 +232,7 @@ export function useAcceleratorApi() {
   }
 
   return {
+    getPlatformSettings,
     requestCode,
     verifyCode,
     updateProfile,
@@ -229,6 +250,8 @@ export function useAcceleratorApi() {
     listTenantInvites,
     revokeInvite,
     removeMember,
+    requestDeleteOrg,
+    confirmDeleteOrg,
     setBackend,
     testBackend,
     getPolicy,

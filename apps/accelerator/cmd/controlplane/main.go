@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/taeven/nance/accelerator/internal/config"
 	"github.com/taeven/nance/accelerator/internal/controlplane/api"
+	"github.com/taeven/nance/accelerator/internal/controlplane/api/handlers"
 	"github.com/taeven/nance/accelerator/internal/controlplane/service"
 	"github.com/taeven/nance/accelerator/internal/controlplane/store"
 	"github.com/taeven/nance/accelerator/internal/crypto"
@@ -72,10 +73,18 @@ func main() {
 	tokenSvc := service.NewTokenService(pgStore)
 	mailer := &service.LogMailer{Log: logger}
 	authSvc := service.NewAuthService(pgStore, mailer, logger)
-	orgSvc := service.NewOrgService(pgStore, mailer)
+	orgSvc := service.NewOrgService(pgStore, mailer).WithInviteOnly(cfg.InviteOnly)
+	if cfg.InviteOnly {
+		logger.Info("invite-only mode enabled (NANCE_INVITE_ONLY): users cannot create organizations; join via invite only; platform admin can still bootstrap tenants")
+	}
 
 	// 5. HTTP server
-	handler := api.NewServer(tenantSvc, backendSvc, policySvc, tokenSvc, authSvc, orgSvc)
+	pub := cfg.PlatformPublic()
+	handler := api.NewServer(tenantSvc, backendSvc, policySvc, tokenSvc, authSvc, orgSvc, handlers.PlatformPublic{
+		InviteOnly:          pub.InviteOnly,
+		AllowOrgCreation:    pub.AllowOrgCreation,
+		AllowAdminBootstrap: pub.AllowAdminBootstrap,
+	})
 
 	srv := &http.Server{
 		Addr:         cfg.Port,

@@ -10,22 +10,44 @@ import (
 
 	"github.com/taeven/nance/accelerator/internal/controlplane/store"
 	"github.com/taeven/nance/accelerator/internal/model"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // OrgService manages organizations (tenants), membership, and invites for dashboard users.
 type OrgService struct {
-	store  store.Store
-	mailer Mailer
+	store      store.Store
+	mailer     Mailer
+	inviteOnly bool // NANCE_INVITE_ONLY: users join via invite only; no self-serve org create
 }
 
 func NewOrgService(s store.Store, mailer Mailer) *OrgService {
 	return &OrgService{store: s, mailer: mailer}
 }
 
+// WithInviteOnly enables invite-only mode (self-hosted deployments).
+func (s *OrgService) WithInviteOnly(inviteOnly bool) *OrgService {
+	s.inviteOnly = inviteOnly
+	return s
+}
+
+// InviteOnly reports whether self-serve organization creation is disabled.
+func (s *OrgService) InviteOnly() bool {
+	return s != nil && s.inviteOnly
+}
+
+var (
+	// ErrOrgCreationDisabled is returned when NANCE_INVITE_ONLY is set and a user tries to create an org.
+	ErrOrgCreationDisabled = errors.New("organization creation is disabled on this instance; you must be invited to join an existing organization")
+)
+
 var slugRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9_-]{1,62}[a-z0-9])?$`)
 
 // CreateOrganization creates a tenant and adds the user as owner.
+// Blocked when invite-only mode is on (callers that are platform admin should use TenantService.Create instead).
 func (s *OrgService) CreateOrganization(ctx context.Context, userID, id, name string) (*model.OrganizationSummary, error) {
+	if s.inviteOnly {
+		return nil, ErrOrgCreationDisabled
+	}
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, errors.New("name is required")
@@ -96,7 +118,7 @@ func (s *OrgService) RequireMember(ctx context.Context, tenantID, userID string)
 	return m, nil
 }
 
-// RequireAdmin requires owner or admin role.
+// RequireAdmin requires owner or admin role (can manage settings; not delete org).
 func (s *OrgService) RequireAdmin(ctx context.Context, tenantID, userID string) (*model.OrganizationMember, error) {
 	m, err := s.RequireMember(ctx, tenantID, userID)
 	if err != nil {
@@ -106,6 +128,28 @@ func (s *OrgService) RequireAdmin(ctx context.Context, tenantID, userID string) 
 		return nil, ErrForbidden
 	}
 	return m, nil
+}
+
+// RequireOwner requires the owner role (only owners may delete the organization).
+func (s *OrgService) RequireOwner(ctx context.Context, tenantID, userID string) (*model.OrganizationMember, error) {
+	m, err := s.RequireMember(ctx, tenantID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if m.Role != model.RoleOwner {
+		return nil, ErrForbidden
+	}
+	return m, nil
+}
+
+// CanManageSettings is true for owner and admin.
+func CanManageSettings(role model.MemberRole) bool {
+	return role == model.RoleOwner || role == model.RoleAdmin
+}
+
+// orgDeleteCodeKey scopes OTP codes for organization deletion (reuses email_verification_codes PK).
+func orgDeleteCodeKey(tenantID, ownerEmail string) string {
+	return "orgdelete:" + tenantID + ":" + strings.ToLower(strings.TrimSpace(ownerEmail))
 }
 
 // ListMembers lists members of an org (caller must be a member).
@@ -124,7 +168,8 @@ func (s *OrgService) ListPendingInvitesForUser(ctx context.Context, user *model.
 }
 
 // InviteMember creates an invite and emails the invitee.
-func (s *OrgService) InviteMember(ctx context.Context, tenantID, inviterID, email string, role model.MemberRole) (*model.OrganizationInvite, error) {
+// inviterRole is used to enforce hierarchy: only owners may invite owners; admins may invite admin/member.
+func (s *OrgService) InviteMember(ctx context.Context, tenantID, inviterID, email string, role model.MemberRole, inviterRole model.MemberRole) (*model.OrganizationInvite, error) {
 	email, err := normalizeEmail(email)
 	if err != nil {
 		return nil, err
@@ -134,6 +179,17 @@ func (s *OrgService) InviteMember(ctx context.Context, tenantID, inviterID, emai
 	}
 	if role != model.RoleMember && role != model.RoleAdmin && role != model.RoleOwner {
 		return nil, errors.New("invalid role")
+	}
+	// Role hierarchy for invites
+	switch inviterRole {
+	case model.RoleOwner:
+		// owners may invite any role
+	case model.RoleAdmin:
+		if role == model.RoleOwner {
+			return nil, errors.New("only owners can invite another owner")
+		}
+	default:
+		return nil, ErrForbidden
 	}
 	// If user already member, reject
 	if u, err := s.store.GetUserByEmail(ctx, email); err == nil {
@@ -213,13 +269,17 @@ func (s *OrgService) AcceptInvite(ctx context.Context, user *model.User, inviteI
 }
 
 // RemoveMember removes a member; cannot remove last owner.
-func (s *OrgService) RemoveMember(ctx context.Context, tenantID, actorID, targetUserID string) error {
+// Admins cannot remove owners; only owners may remove other owners.
+func (s *OrgService) RemoveMember(ctx context.Context, tenantID, actorID, targetUserID string, actorRole model.MemberRole) error {
 	target, err := s.store.GetMember(ctx, tenantID, targetUserID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return ErrNotMember
 		}
 		return err
+	}
+	if target.Role == model.RoleOwner && actorRole != model.RoleOwner {
+		return errors.New("only owners can remove an owner")
 	}
 	if target.Role == model.RoleOwner {
 		members, err := s.store.ListMembers(ctx, tenantID)
@@ -259,5 +319,81 @@ func (s *OrgService) RevokeInvite(ctx context.Context, tenantID, actorID, invite
 		return err
 	}
 	_ = s.store.RecordAudit(ctx, tenantID, actorID, "revoke_invite", map[string]string{"inviteId": inviteID})
+	return nil
+}
+
+// RequestDeleteOrganization sends a verification code to the owner's email.
+// Only owners may call this; admins and members are rejected.
+func (s *OrgService) RequestDeleteOrganization(ctx context.Context, tenantID string, owner *model.User) error {
+	if _, err := s.RequireOwner(ctx, tenantID, owner.ID); err != nil {
+		return err
+	}
+	t, err := s.store.GetTenant(ctx, tenantID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrTenantNotFound
+		}
+		return err
+	}
+	code, err := randomDigits(6)
+	if err != nil {
+		return err
+	}
+	hashBytes, err := bcrypt.GenerateFromPassword([]byte(code), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	key := orgDeleteCodeKey(tenantID, owner.Email)
+	expires := time.Now().UTC().Add(15 * time.Minute)
+	if err := s.store.SetEmailVerificationCode(ctx, key, string(hashBytes), expires); err != nil {
+		return err
+	}
+	body := fmt.Sprintf(
+		"You requested to permanently delete organization %q (%s) on Nance.\n\n"+
+			"This will remove the organization, members, invites, backends, cache policies, proxy tokens, and related data. This cannot be undone.\n\n"+
+			"Verification code: %s\n\nExpires in 15 minutes. If you did not request this, ignore this email.\n",
+		t.Name, t.ID, code,
+	)
+	if s.mailer != nil {
+		_ = s.mailer.Send(ctx, owner.Email, "Confirm organization deletion — Nance", body)
+	}
+	_ = s.store.RecordAudit(ctx, tenantID, owner.ID, "request_delete_organization", map[string]string{"email": owner.Email})
+	return nil
+}
+
+// ConfirmDeleteOrganization verifies the email code and permanently deletes the org and cascaded data.
+func (s *OrgService) ConfirmDeleteOrganization(ctx context.Context, tenantID string, owner *model.User, code string) error {
+	if _, err := s.RequireOwner(ctx, tenantID, owner.ID); err != nil {
+		return err
+	}
+	code = strings.TrimSpace(code)
+	if len(code) < 4 {
+		return ErrInvalidCode
+	}
+	key := orgDeleteCodeKey(tenantID, owner.Email)
+	hash, expires, attempts, err := s.store.GetEmailVerificationCode(ctx, key)
+	if err != nil {
+		return ErrInvalidCode
+	}
+	if attempts >= 8 {
+		return ErrTooManyAttempts
+	}
+	if time.Now().UTC().After(expires) {
+		_ = s.store.ClearEmailVerificationCode(ctx, key)
+		return ErrInvalidCode
+	}
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(code)) != nil {
+		_ = s.store.IncrementEmailVerificationAttempts(ctx, key)
+		return ErrInvalidCode
+	}
+	_ = s.store.ClearEmailVerificationCode(ctx, key)
+
+	_ = s.store.RecordAudit(ctx, tenantID, owner.ID, "delete_organization", map[string]string{"confirmed": "true"})
+	if err := s.store.DeleteTenant(ctx, tenantID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrTenantNotFound
+		}
+		return err
+	}
 	return nil
 }

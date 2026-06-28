@@ -1,10 +1,55 @@
 # Nance Accelerator
 
-MongoDB accelerator control plane (Phase 0) + passthrough proxy data plane (Phase 1).
+Control plane (**HTTP API**) and data-plane **MongoDB proxy** for the Nance accelerator.
 
-See [../../phase0.md](../../phase0.md) and [../../phase1.md](../../phase1.md) for plans and success criteria.
+- **Control plane** (`cmd/controlplane`): tenants/orgs, users, email OTP sessions, invites, encrypted backends, cache policies, proxy tokens, platform settings (`NANCE_INVITE_ONLY`).
+- **Proxy** (`cmd/proxy`): MongoDB wire protocol (OP_MSG), PLAIN auth with tenant tokens, connection pooling to each tenant’s real MongoDB, optional Redis read-through cache for `*_cache` collections.
 
-## Quick Start (Local Development)
+Part of the [Nance monorepo](../../README.md). UI: [`../admin-dashboard`](../admin-dashboard). Load tests: [`../mongo-loadtest`](../mongo-loadtest).
+
+## Architecture
+
+```
+Clients (drivers)                    Operators (dashboard / curl)
+        │                                      │
+        │  Mongo wire :27018                   │  HTTP :8080
+        ▼                                      ▼
+   ┌─────────────┐                      ┌──────────────────┐
+   │    Proxy    │──policies/tokens/───►│  Control plane   │
+   │             │   backends (PG)      │  + migrations    │
+   └──────┬──────┘                      └────────┬─────────┘
+          │                                      │
+          ▼                                      ▼
+   Tenant MongoDB                            Postgres
+   Redis (cache)                             (optional Redis for invalidate)
+```
+
+### Caching
+
+| Client collection | Behavior |
+|-------------------|----------|
+| `orders_cache` | Cache **on** — proxy uses real collection `orders`, default TTL **60s** (overridable) |
+| `orders` | Cache **off** — always MongoDB |
+
+Policy in the control plane sets **default TTL** and optional **per-collection overrides** (real names like `mydb.orders`). Caching is **not** gated on an “enabled” flag anymore; the `_cache` suffix is the opt-in.
+
+### Roles (organizations)
+
+| Role | Dashboard / API |
+|------|------------------|
+| **member** | Read-only |
+| **admin** | Manage settings; cannot delete org |
+| **owner** | Full control; delete org requires email verification code |
+
+### Invite-only (self-host)
+
+```bash
+export NANCE_INVITE_ONLY=true
+```
+
+Users cannot create organizations; they join via invite only. Bootstrap tenants with `NANCE_ADMIN_TOKEN` via `POST /api/v1/tenants`. See `GET /api/v1/platform`.
+
+## Quick start (local)
 
 ### 1. Infrastructure
 
@@ -12,191 +57,165 @@ See [../../phase0.md](../../phase0.md) and [../../phase1.md](../../phase1.md) fo
 make dev-up
 ```
 
-Starts Postgres (`:5432`), real MongoDB (`:27017`), and Redis (`:6379`).
+Starts Postgres (`:5432`), MongoDB (`:27017`), Redis (`:6379`) via `docker-compose.yml`.
 
-### 2. Control plane (HTTP API on `:8080`)
+### 2. Control plane (`:8080`)
 
 ```bash
-export NANCE_MASTER_KEY="thisisexactly32byteslongforaes256!!"   # 32 bytes (or base64)
-# Optional: export NANCE_ADMIN_TOKEN=supersecret   (if unset, dev allows all requests)
+export NANCE_MASTER_KEY="thisisexactly32byteslongforaes256!!"   # 32-byte key or base64
+# Optional:
+# export NANCE_ADMIN_TOKEN=supersecret
+# export NANCE_INVITE_ONLY=true
+# export NANCE_REQUIRE_USER_AUTH=1   # require real auth even if admin token unset
+# export NANCE_REDIS_ADDR=localhost:6379
 make run
 # or: go run ./cmd/controlplane
 ```
 
-### 3. Seed demo tenant + token
+Migrations under `migrations/` apply on startup (simple file runner).
+
+### 3. Seed demo tenant + token (dev)
 
 ```bash
 make seed
 ```
 
-Copy the `rawToken` from the response — it is only shown once.
+Uses admin bearer (`NANCE_ADMIN_TOKEN` or `dev` in the Makefile). Copy `rawToken` — shown only once.
 
-### 4. Data plane proxy (Mongo wire on `:27018`, health on `:9090`)
+### 4. Proxy (`:27018`, health `:9090`)
 
 ```bash
 export NANCE_MASTER_KEY="thisisexactly32byteslongforaes256!!"
 export DATABASE_URL="postgres://nance:nance@localhost:5432/nance?sslmode=disable"
+export NANCE_REDIS_ADDR=localhost:6379
+export NANCE_CACHE_ENABLED=true
 make run-proxy
 # or: go run ./cmd/proxy
 ```
 
-**Port note**: compose Mongo owns `:27017`; the proxy defaults to `:27018` so both can run locally. Override with `NANCE_PROXY_LISTEN=:27017` if nothing else is on that port.
+Compose Mongo owns `:27017`; proxy defaults to **`:27018`**. Override with `NANCE_PROXY_LISTEN`.
 
 ### 5. Connect through the proxy
 
-**Phase 1 requires `authMechanism=PLAIN`** (SCRAM is not implemented yet).
+**PLAIN only** (no SCRAM yet). Username = tenant id, password = raw token:
 
-Username = tenant id (`demo`), password = the `rawToken` from step 3.
-
-```bash
-# mongosh
-mongosh "mongodb://demo:<rawToken>@127.0.0.1:27018/mydb?authMechanism=PLAIN&authSource=%24external"
-
-# Then normal MongoDB operations:
-# > db.users.insertOne({ name: "alice" })
-# > db.users.find().toArray()
+```text
+mongodb://demo:<rawToken>@127.0.0.1:27018/mydb?authMechanism=PLAIN&authSource=$external
 ```
 
-Node.js example:
-
-```js
-const { MongoClient } = require("mongodb");
-const uri =
-  "mongodb://demo:<rawToken>@127.0.0.1:27018/mydb?authMechanism=PLAIN&authSource=$external";
-const client = new MongoClient(uri);
-await client.connect();
-await client.db("mydb").collection("users").insertOne({ name: "alice" });
-console.log(await client.db("mydb").collection("users").find().toArray());
-```
-
-Python (pymongo):
-
-```python
-from pymongo import MongoClient
-uri = "mongodb://demo:<rawToken>@127.0.0.1:27018/mydb?authMechanism=PLAIN&authSource=$external"
-client = MongoClient(uri)
-client.mydb.users.insert_one({"name": "alice"})
-print(list(client.mydb.users.find()))
-```
-
-Go (official driver):
-
-```go
-uri := "mongodb://demo:<rawToken>@127.0.0.1:27018/mydb?authMechanism=PLAIN&authSource=$external"
-client, err := mongo.Connect(ctx, options.Client().ApplyURI(uri))
-```
-
-The `mongodb+nance://` scheme from the architecture doc is the product-facing form; most drivers need `mongodb://` (or a driver option that accepts a custom scheme). Functionally the credentials and host are what matter.
-
-## Architecture (what Phase 1 delivers)
-
-```
-App / mongosh / Compass
-        │  OP_MSG (hello, saslStart PLAIN, find, insert, …)
-        ▼
- Nance Proxy (:27018)  ──reads──►  Postgres (tokens, encrypted backend URIs)
-        │  decrypts URI with NANCE_MASTER_KEY
-        │  one pooled mongo.Client per tenant
-        ▼
- Tenant's real MongoDB (:27017 in local compose)
-```
-
-- **Phase 2 read-through cache**: Redis-backed caching **opt-in per query** via `collection_cache` (suffix `_cache`). Proxy strips the suffix and uses the real collection; default TTL is **60 seconds** for all collections (override per tenant or per collection in policy). No suffix → always MongoDB. Fail-open if Redis is down. Set `NANCE_REDIS_ADDR`, `NANCE_CACHE_ENABLED=true`.
-- **Tenant isolation**: after PLAIN auth, each TCP connection is bound to one tenant; backend clients are never shared across tenants.
-- **Connection pooling**: many app-side connections collapse to a small driver pool per tenant on the real cluster.
-- **Topology lie**: `hello` / `isMaster` always reports a single writable primary (no replica-set host list).
-
-## Important Environment Variables
+## Important environment variables
 
 ### Control plane (`cmd/controlplane`)
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `NANCE_MASTER_KEY` | (required for backends) | 32-byte AES key for encrypting real Mongo URIs |
+| `NANCE_MASTER_KEY` | (required for backends) | AES key for encrypting tenant Mongo URIs |
 | `DATABASE_URL` | `postgres://nance:nance@localhost:5432/nance?sslmode=disable` | Postgres |
-| `NANCE_ADMIN_TOKEN` | (empty = open in dev) | Bearer for `/api/v1/*` |
-| `PORT` | `8080` | HTTP listen |
+| `NANCE_ADMIN_TOKEN` | (empty = open / legacy dev mode unless restricted) | Platform admin bearer |
+| `NANCE_INVITE_ONLY` | `false` | Users cannot create orgs; join via invite only |
+| `NANCE_REQUIRE_USER_AUTH` | unset | If `1`, require session/admin token even when admin token is empty |
+| `PORT` | `8080` | HTTP listen (host uses `PORT`; bind is `:`+port) |
 | `MIGRATIONS_DIR` | `./migrations` | SQL migrations |
+| `NANCE_REDIS_ADDR` | | Optional Redis for explicit invalidation from API |
+| `NANCE_REDIS_PASSWORD` | | Redis password |
 
 ### Proxy (`cmd/proxy`)
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `NANCE_MASTER_KEY` | (required) | Decrypt backend URIs |
-| `DATABASE_URL` | same as above | Token + backend lookup |
+| `DATABASE_URL` | same as CP | Token + backend + policy lookup |
 | `NANCE_PROXY_LISTEN` | `:27018` | Mongo wire TCP listen |
 | `NANCE_PROXY_HEALTH_LISTEN` | `:9090` | `/healthz`, `/readyz`, `/metrics` |
-| `NANCE_PROXY_MAX_CONNS_PER_TENANT` | `200` | Soft limit on client TCP conns per tenant |
-| `NANCE_PROXY_BACKEND_MAX_POOL` | `50` | Driver `MaxPoolSize` toward real Mongo |
-| `NANCE_PROXY_BACKEND_MIN_POOL` | `0` | Driver `MinPoolSize` |
-| `NANCE_PROXY_BACKEND_CONNECT_TIMEOUT` | `10s` | Backend connect/selection timeout |
-| `NANCE_PROXY_CURSOR_IDLE_TIMEOUT` | `10m` | Prune idle server-side cursor state |
-| `NANCE_PROXY_ALLOW_UNAUTH` | `false` | Dev only: allow commands without auth |
+| `NANCE_REDIS_ADDR` | | Redis for read-through cache |
+| `NANCE_CACHE_ENABLED` | | Enable cache path when Redis is configured |
+| `NANCE_POLICY_REFRESH_INTERVAL` | `30s` | Reload cache policies from Postgres |
+| `NANCE_PROXY_MAX_CONNS_PER_TENANT` | `200` | Soft limit client TCP conns per tenant |
+| `NANCE_PROXY_BACKEND_MAX_POOL` | `50` | Driver pool toward real Mongo |
+| `NANCE_PROXY_CURSOR_IDLE_TIMEOUT` | `10m` | Prune idle cursor state |
+| `NANCE_PROXY_ALLOW_UNAUTH` | `false` | Dev only |
 
-## Control plane API (under `/api/v1`)
+## Control plane API (summary)
 
-### Auth (email OTP — public)
+Base path: **`/api/v1`**. Health: `/healthz`, `/readyz`, `/metrics`.
 
-- `POST /auth/request-code` — `{ "email": "you@co.com" }` sends a 6-digit code (dev: logged by control plane)
-- `POST /auth/verify` — `{ "email", "code", "name?" }` → `{ "token", "user" }` (session bearer, 30 days)
-- `POST /auth/logout` — invalidate session (Bearer user token)
-- `GET  /me` — current user
+### Public
 
-### Organizations (Bearer user session)
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/platform` | `{ inviteOnly, allowOrgCreation, allowAdminBootstrap }` |
+| `POST` | `/auth/request-code` | `{ "email" }` — send OTP (dev: log mailer) |
+| `POST` | `/auth/verify` | `{ "email", "code" }` → `{ token, user }` |
 
-- `GET  /me/organizations` — orgs the user belongs to (with `role`)
-- `POST /me/organizations` — create org/tenant `{ "name", "id?" }` (caller becomes `owner`)
-- `GET  /me/invites` — pending invites for the user's email
-- `POST /me/invites/{inviteId}/accept`
+### Authenticated (user session **or** `NANCE_ADMIN_TOKEN`)
 
-### Tenant ops (Bearer user session **or** `NANCE_ADMIN_TOKEN`)
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/auth/logout` | Invalidate session |
+| `GET` / `PATCH` | `/me` | Current user; patch `{ "name" }` (onboarding) |
+| `GET` / `POST` | `/me/organizations` | List / create org (create blocked if invite-only) |
+| `GET` | `/me/invites` | Pending invites for user email |
+| `POST` | `/me/invites/{id}/accept` | Accept invite |
+| `GET` / `POST` | `/tenants` | List (membership-scoped) / create |
+| `GET` | `/tenants/{id}` | Tenant + `role`, `canManage`, `canDelete` |
+| `POST` | `/tenants/{id}/delete/request-code` | Owner: email delete confirmation code |
+| `POST` | `/tenants/{id}/delete/confirm` | Owner: `{ "code" }` — cascade delete org |
+| `GET` | `/tenants/{id}/members` | List members |
+| `POST` / `GET` | `/tenants/{id}/invites` | Invite / list pending (admin+) |
+| `DELETE` | `/tenants/{id}/invites/{inviteId}` | Revoke invite |
+| `DELETE` | `/tenants/{id}/members/{userId}` | Remove member |
+| `POST` | `/tenants/{id}/backend` | `{ "uri" }` encrypted backend |
+| `POST` | `/tenants/{id}/backend/test` | Connectivity test |
+| `GET` | `/tenants/{id}/policy` | Cache policy |
+| `PUT` | `/tenants/{id}/policy/defaults` | `{ "defaultTtlSeconds" }` |
+| `PUT` | `/tenants/{id}/policy/collections/{db.coll}` | Per-collection TTL override |
+| `POST` | `/tenants/{id}/invalidate` | Flush cache namespace/tags |
+| `GET` | `/tenants/{id}/savings` | Metrics hints |
+| `POST` / `GET` | `/tenants/{id}/tokens` | Issue / list proxy tokens |
+| `DELETE` | `/tokens/{tokenId}` | Revoke token |
 
-Membership required for user sessions; admin token is platform superuser.
-
-- `POST   /tenants` — create tenant (user becomes owner when not platform admin)
-- `GET    /tenants` — user's orgs, or all tenants for platform admin
-- `GET    /tenants/{tenantId}`
-- `GET    /tenants/{tenantId}/members`
-- `POST   /tenants/{tenantId}/invites` — `{ "email", "role?" }` (owner/admin)
-- `GET    /tenants/{tenantId}/invites`
-- `DELETE /tenants/{tenantId}/invites/{inviteId}`
-- `DELETE /tenants/{tenantId}/members/{userId}`
-- `POST   /tenants/{tenantId}/backend` — `{ "uri": "mongodb://real..." }` (stored encrypted)
-- `POST   /tenants/{tenantId}/backend/test`
-- `GET    /tenants/{tenantId}/policy`
-- `PUT    /tenants/{tenantId}/policy/collections/{db.coll}`
-- `PUT    /tenants/{tenantId}/policy/defaults`
-- `POST   /tenants/{tenantId}/tokens` — returns `{ "rawToken", "tokenId", ... }`
-- `GET    /tenants/{tenantId}/tokens`
-- `DELETE /tokens/{tokenId}`
-
-Set `NANCE_REQUIRE_USER_AUTH=1` to disable legacy open mode when `NANCE_ADMIN_TOKEN` is empty.
-
-Health: `/healthz`, `/readyz`, `/metrics` on the control plane port; proxy exposes the same paths on `NANCE_PROXY_HEALTH_LISTEN`.
-
-## Security Notes
-
-- Real MongoDB connection strings are **never** stored in plaintext and never sent to clients.
-- They are encrypted at rest with AES-256-GCM using `NANCE_MASTER_KEY`.
-- Data-plane tokens are returned raw **once**; only a bcrypt hash is stored. The proxy validates the raw token via bcrypt on `saslStart` (PLAIN).
-- One TCP connection = one tenant after successful auth.
-
-## Known limitations (Phase 1)
-
-- **PLAIN only** — no SCRAM-SHA-256. Clients must set `authMechanism=PLAIN&authSource=$external`.
-- **Not a real replica set** — no `hosts` / `setName`; secondary targeting and change-stream edge cases may fail.
-- **Cursor mapping** is implemented for `find` / `aggregate` via the Go driver; other cursor-producing paths go through `RunCommand` and may not support multi-batch `getMore` through the proxy.
-- **No Redis / caching** — all reads and writes pass through to the backend.
-- Legacy opcodes other than minimal `OP_QUERY` isMaster are rejected (modern drivers use `OP_MSG`).
+**Membership:** members = read; admins/owners = writes; only owners delete org (with email code). Platform admin token bypasses membership for ops/bootstrap.
 
 ## Build & test
 
 ```bash
 make build-all
 make test
-make lint
+make lint   # if configured
 ```
 
-## Next
+## Docker / K8s
 
-Phase 2 read-through cache is implemented (see [../../phase2.md](../../phase2.md)). Opt in per query with the `_cache` collection suffix (e.g. `db.orders_cache.find(...)` → real `orders` + cache at **60s TTL by default**). Override TTL/size via policy API; proxy loads policies every `NANCE_POLICY_REFRESH_INTERVAL` (default 30s). Writes to the real collection invalidate that namespace in Redis.
+- `Dockerfile.controlplane`, `Dockerfile.proxy`
+- `docker-compose.yml` for local deps
+- `deploy/k8s/` — sample proxy deployment and multi-region notes
+
+## Security notes
+
+- Real Mongo URIs are **never** stored in plaintext; encrypted with `NANCE_MASTER_KEY`.
+- Data-plane tokens: bcrypt hash in DB; **raw token returned once** at issuance.
+- Email OTP sessions are SHA-256 hashed in `user_sessions`.
+- Prefer invite-only + admin token on shared networks; terminate TLS at ingress.
+
+## Known limitations
+
+- Proxy auth: **PLAIN only** (set `authMechanism=PLAIN&authSource=$external`).
+- Not a real replica set topology (`hello` reports a single primary).
+- Cursor mapping is strongest for `find` / `aggregate` via driver helpers.
+- Legacy opcodes beyond minimal `OP_QUERY` isMaster are rejected.
+
+## Makefile targets
+
+| Target | Action |
+|--------|--------|
+| `dev-up` / `dev-down` | Compose infra up / down |
+| `run` / `run-proxy` | Build + run control plane / proxy |
+| `build` / `build-proxy` / `build-all` | Binaries under `bin/` |
+| `seed` | Demo tenant + backend + token via curl |
+| `test` | Go tests |
+
+## Related apps
+
+- [Admin dashboard](../admin-dashboard/README.md) — Nuxt UI on this API  
+- [mongo-loadtest](../mongo-loadtest/README.md) — stress Mongo or the proxy  
+- [Monorepo root](../../README.md)

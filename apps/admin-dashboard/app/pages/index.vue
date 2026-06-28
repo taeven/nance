@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import type { OrganizationInvite, OrganizationSummary } from '~/types/accelerator'
+import type { OrganizationInvite, OrganizationSummary, PlatformSettings } from '~/types/accelerator'
 
 const api = useAcceleratorApi()
 const auth = useAuth()
 
 const orgs = ref<OrganizationSummary[]>([])
 const invites = ref<OrganizationInvite[]>([])
+const platform = ref<PlatformSettings | null>(null)
 const loading = ref(true)
 const error = ref('')
 const showCreate = ref(false)
@@ -14,16 +15,20 @@ const createError = ref('')
 const form = reactive({ id: '', name: '' })
 const accepting = ref<string | null>(null)
 
+const allowCreate = computed(() => platform.value?.allowOrgCreation !== false)
+
 async function load() {
   loading.value = true
   error.value = ''
   try {
-    const [o, inv] = await Promise.all([
+    const [o, inv, plat] = await Promise.all([
       api.listOrganizations(),
       api.listMyInvites(),
+      api.getPlatformSettings().catch(() => ({ inviteOnly: false, allowOrgCreation: true, allowAdminBootstrap: true } as PlatformSettings)),
     ])
     orgs.value = o
     invites.value = inv
+    platform.value = plat
   }
   catch (e) {
     error.value = api.apiErrorMessage(e)
@@ -35,6 +40,10 @@ async function load() {
 
 async function onCreate() {
   createError.value = ''
+  if (!allowCreate.value) {
+    createError.value = 'This instance is invite-only. Ask an organization admin to invite you.'
+    return
+  }
   if (!form.name.trim()) {
     createError.value = 'Organization name is required'
     return
@@ -87,9 +96,24 @@ watch(() => auth.isLoggedIn.value, (v) => { if (v) load() })
           <code class="mono">_cache</code> collection suffix (default TTL 60s).
         </p>
       </div>
-      <button class="btn btn-primary" type="button" @click="showCreate = true">
+      <button
+        v-if="allowCreate"
+        class="btn btn-primary"
+        type="button"
+        @click="showCreate = true"
+      >
         + New organization
       </button>
+    </div>
+
+    <div
+      v-if="platform?.inviteOnly"
+      class="alert alert-info mb-3"
+    >
+      <strong>Invite-only instance.</strong>
+      An operator enabled <code class="mono">NANCE_INVITE_ONLY</code> on this server.
+      You can sign in, but you can only join organizations you are invited to — creating a new organization is disabled.
+      Ask an existing admin or owner to invite your email.
     </div>
 
     <div v-if="error" class="alert alert-error">{{ error }}</div>
@@ -117,11 +141,24 @@ watch(() => auth.isLoggedIn.value, (v) => { if (v) load() })
     <div v-if="loading" class="loading">Loading organizations…</div>
 
     <div v-else-if="!orgs.length" class="card empty-state">
-      <p><strong>No organizations yet</strong></p>
-      <p>Create an organization to configure MongoDB backends and issue proxy tokens.</p>
-      <button class="btn btn-primary mt-2" type="button" @click="showCreate = true">
-        Create organization
-      </button>
+      <template v-if="platform?.inviteOnly">
+        <p><strong>No organizations yet</strong></p>
+        <p v-if="invites.length">
+          Accept an invite above to get started.
+        </p>
+        <p v-else>
+          This instance is invite-only. When an owner or admin invites
+          <strong v-if="auth.user">{{ auth.user.email }}</strong><span v-else>your email</span>,
+          the invitation will show up here. Self-serve organization creation is turned off by the operator.
+        </p>
+      </template>
+      <template v-else>
+        <p><strong>No organizations yet</strong></p>
+        <p>Create an organization to configure a MongoDB backend and issue proxy tokens.</p>
+        <button class="btn btn-primary mt-2" type="button" @click="showCreate = true">
+          Create organization
+        </button>
+      </template>
     </div>
 
     <div v-else class="table-wrap">
@@ -147,7 +184,7 @@ watch(() => auth.isLoggedIn.value, (v) => { if (v) load() })
       </table>
     </div>
 
-    <div v-if="showCreate" class="modal-backdrop" @click.self="showCreate = false">
+    <div v-if="showCreate && allowCreate" class="modal-backdrop" @click.self="showCreate = false">
       <div class="modal card">
         <h3>Create organization</h3>
         <div v-if="createError" class="alert alert-error">{{ createError }}</div>

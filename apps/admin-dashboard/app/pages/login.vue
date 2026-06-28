@@ -10,13 +10,19 @@ const code = ref('')
 const loading = ref(false)
 const error = ref('')
 const info = ref('')
+const inviteOnly = ref(false)
 
 function needsOnboarding(name?: string | null) {
   return !name || !String(name).trim()
 }
 
-onMounted(() => {
+onMounted(async () => {
   auth.loadFromStorage()
+  try {
+    const plat = await api.getPlatformSettings()
+    inviteOnly.value = !!plat.inviteOnly
+  }
+  catch { /* ignore */ }
   if (auth.isLoggedIn.value) {
     navigateTo(needsOnboarding(auth.user.value?.name) ? '/onboarding' : '/')
   }
@@ -72,6 +78,7 @@ async function verify() {
         <div>
           <h1>Nance</h1>
           <p class="subtitle">Sign in with your email</p>
+          <p v-if="inviteOnly" class="invite-hint">This server is invite-only — you can sign in, then accept an organization invite. Creating new organizations is disabled.</p>
         </div>
       </div>
 
@@ -143,6 +150,7 @@ async function verify() {
   color: inherit;
 }
 .muted { font-size: 0.9rem; opacity: 0.85; }
+.invite-hint { font-size: 0.8rem; opacity: 0.8; margin: 0.35rem 0 0; max-width: 22rem; line-height: 1.35; }
 .alert-info {
   background: rgba(91, 141, 239, 0.12);
   border: 1px solid rgba(91, 141, 239, 0.35);
