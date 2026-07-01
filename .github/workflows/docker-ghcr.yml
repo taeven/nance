@@ -2,7 +2,7 @@ name: Build and push Docker images (GHCR)
 
 on:
   push:
-    branches: [main, dev, "phase-*"]
+    branches: [main]
     tags: ["v*"]
   pull_request:
     branches: [main, dev]
