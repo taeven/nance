@@ -24,11 +24,11 @@ func NewServer(
 
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
 	h := handlers.NewHandlers(ts, bs, ps, toks, authSvc, orgSvc, platform)
 
+	// Probe endpoints without access logs (k8s/LB scrapes).
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
@@ -39,55 +39,59 @@ func NewServer(
 	})
 	r.Handle("/metrics", promhttp.Handler())
 
-	r.Route("/api/v1", func(r chi.Router) {
-		// Public: instance mode for self-hosters (invite-only, etc.) + auth
-		r.Get("/platform", h.GetPlatformSettings)
-		r.Post("/auth/request-code", h.RequestCode)
-		r.Post("/auth/verify", h.VerifyCode)
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.Logger)
 
-		// Authenticated routes (user session or platform admin token)
-		r.Group(func(r chi.Router) {
-			r.Use(auth.Middleware(authSvc))
+		r.Route("/api/v1", func(r chi.Router) {
+			// Public: instance mode for self-hosters (invite-only, etc.) + auth
+			r.Get("/platform", h.GetPlatformSettings)
+			r.Post("/auth/request-code", h.RequestCode)
+			r.Post("/auth/verify", h.VerifyCode)
 
-			r.Post("/auth/logout", h.Logout)
-			r.Get("/me", h.Me)
-			r.Patch("/me", h.UpdateMe)
-			r.Get("/me/organizations", h.ListMyOrganizations)
-			r.Post("/me/organizations", h.CreateMyOrganization)
-			r.Get("/me/invites", h.ListMyInvites)
-			r.Post("/me/invites/{inviteId}/accept", h.AcceptInvite)
+			// Authenticated routes (user session or platform admin token)
+			r.Group(func(r chi.Router) {
+				r.Use(auth.Middleware(authSvc))
 
-			// Tenants / organizations
-			// Role hierarchy: member = read-only, admin = manage settings, owner = + delete org
-			r.Post("/tenants", h.CreateTenant)
-			r.Get("/tenants", h.ListTenants)
-			r.Get("/tenants/{tenantId}", h.GetTenant)
-			r.Post("/tenants/{tenantId}/delete/request-code", h.RequestDeleteOrganization) // owner only
-			r.Post("/tenants/{tenantId}/delete/confirm", h.ConfirmDeleteOrganization)      // owner only + email code
+				r.Post("/auth/logout", h.Logout)
+				r.Get("/me", h.Me)
+				r.Patch("/me", h.UpdateMe)
+				r.Get("/me/organizations", h.ListMyOrganizations)
+				r.Post("/me/organizations", h.CreateMyOrganization)
+				r.Get("/me/invites", h.ListMyInvites)
+				r.Post("/me/invites/{inviteId}/accept", h.AcceptInvite)
 
-			// Members & invites (admin+; invite role limits apply)
-			r.Get("/tenants/{tenantId}/members", h.ListMembers)
-			r.Post("/tenants/{tenantId}/invites", h.InviteMember)
-			r.Get("/tenants/{tenantId}/invites", h.ListTenantInvites)
-			r.Delete("/tenants/{tenantId}/invites/{inviteId}", h.RevokeInvite)
-			r.Delete("/tenants/{tenantId}/members/{userId}", h.RemoveMember)
+				// Tenants / organizations
+				// Role hierarchy: member = read-only, admin = manage settings, owner = + delete org
+				r.Post("/tenants", h.CreateTenant)
+				r.Get("/tenants", h.ListTenants)
+				r.Get("/tenants/{tenantId}", h.GetTenant)
+				r.Post("/tenants/{tenantId}/delete/request-code", h.RequestDeleteOrganization) // owner only
+				r.Post("/tenants/{tenantId}/delete/confirm", h.ConfirmDeleteOrganization)      // owner only + email code
 
-			// Backends (admin+ write; test is read-ok for members)
-			r.Post("/tenants/{tenantId}/backend", h.SetBackend)
-			r.Post("/tenants/{tenantId}/backend/test", h.TestBackend)
+				// Members & invites (admin+; invite role limits apply)
+				r.Get("/tenants/{tenantId}/members", h.ListMembers)
+				r.Post("/tenants/{tenantId}/invites", h.InviteMember)
+				r.Get("/tenants/{tenantId}/invites", h.ListTenantInvites)
+				r.Delete("/tenants/{tenantId}/invites/{inviteId}", h.RevokeInvite)
+				r.Delete("/tenants/{tenantId}/members/{userId}", h.RemoveMember)
 
-			// Policies (GET member; PUT admin+)
-			r.Get("/tenants/{tenantId}/policy", h.GetPolicy)
-			r.Put("/tenants/{tenantId}/policy/collections/{dbColl}", h.SetCollectionPolicy)
-			r.Put("/tenants/{tenantId}/policy/defaults", h.SetDefaultTTL)
+				// Backends (admin+ write; test is read-ok for members)
+				r.Post("/tenants/{tenantId}/backend", h.SetBackend)
+				r.Post("/tenants/{tenantId}/backend/test", h.TestBackend)
 
-			r.Post("/tenants/{tenantId}/invalidate", h.Invalidate) // admin+
-			r.Get("/tenants/{tenantId}/savings", h.SavingsReport)
+				// Policies (GET member; PUT admin+)
+				r.Get("/tenants/{tenantId}/policy", h.GetPolicy)
+				r.Put("/tenants/{tenantId}/policy/collections/{dbColl}", h.SetCollectionPolicy)
+				r.Put("/tenants/{tenantId}/policy/defaults", h.SetDefaultTTL)
 
-			// Tokens (list member; issue/revoke admin+)
-			r.Post("/tenants/{tenantId}/tokens", h.IssueToken)
-			r.Get("/tenants/{tenantId}/tokens", h.ListTokens)
-			r.Delete("/tokens/{tokenId}", h.RevokeToken)
+				r.Post("/tenants/{tenantId}/invalidate", h.Invalidate) // admin+
+				r.Get("/tenants/{tenantId}/savings", h.SavingsReport)
+
+				// Tokens (list member; issue/revoke admin+)
+				r.Post("/tenants/{tenantId}/tokens", h.IssueToken)
+				r.Get("/tenants/{tenantId}/tokens", h.ListTokens)
+				r.Delete("/tokens/{tokenId}", h.RevokeToken)
+			})
 		})
 	})
 
