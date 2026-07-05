@@ -65,10 +65,10 @@ Open [http://localhost:3000](http://localhost:3000).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NANCE_ACCELERATOR_URL` | `http://localhost:8080` | Control plane base URL (**server-only**) |
+| `NANCE_ACCELERATOR_URL` | `http://localhost:8080` | Control plane base URL (**server-only**, read at request time) |
 | `NANCE_ADMIN_TOKEN` | _(empty)_ | Optional platform admin bearer (**server-only** fallback) |
 
-Configured in `nuxt.config.ts` as `runtimeConfig.acceleratorBaseUrl` / `acceleratorAdminToken`.
+Resolved in `server/utils/accelerator.ts` (not only from build-time `runtimeConfig`). Check what the server is using via `GET /api/health` → `accelerator`.
 
 ## Architecture
 

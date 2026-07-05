@@ -1,11 +1,19 @@
 import type { H3Event } from 'h3'
 
+/**
+ * Resolve accelerator control-plane config at request time.
+ *
+ * Nuxt only auto-overrides runtimeConfig from NUXT_* env vars
+ * (e.g. NUXT_ACCELERATOR_BASE_URL). We intentionally also honor the
+ * monorepo NANCE_* names at runtime so Docker/prod can set
+ * NANCE_ACCELERATOR_URL without rebuilding — process.env.NANCE_* in
+ * nuxt.config is evaluated only at build/config load and is baked in.
+ */
 export function getAcceleratorConfig(event: H3Event) {
   const config = useRuntimeConfig(event)
-  return {
-    baseUrl: (config.acceleratorBaseUrl as string).replace(/\/$/, ''),
-    adminToken: config.acceleratorAdminToken as string,
-  }
+  const baseUrl = ((process.env.NANCE_ACCELERATOR_URL || config.acceleratorBaseUrl) as string).replace(/\/$/, '')
+  const adminToken = (process.env.NANCE_ADMIN_TOKEN || config.acceleratorAdminToken as string)
+  return { baseUrl, adminToken }
 }
 
 export async function acceleratorFetch<T>(
