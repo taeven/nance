@@ -1,13 +1,12 @@
-import type { StatusResponse } from '~/types/accelerator'
+import type { Connection } from '~/types/accelerator'
 
 export default defineEventHandler(async (event) => {
   const tenantId = getRouterParam(event, 'tenantId')
   if (!tenantId) {
     throw createError({ statusCode: 400, statusMessage: 'tenantId required' })
   }
-  return acceleratorFetch<StatusResponse>(
+  return acceleratorFetch<Connection[]>(
     event,
-    `/api/v1/tenants/${encodeURIComponent(tenantId)}/backend/test`,
-    { method: 'POST' },
+    `/api/v1/tenants/${encodeURIComponent(tenantId)}/connections`,
   )
 })

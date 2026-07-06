@@ -9,6 +9,7 @@ import { toast } from 'vue-sonner'
 import type {
   CachePolicy,
   CollectionPolicy,
+  Connection,
   IssueTokenResponse,
   OrganizationInvite,
   OrganizationMember,
@@ -93,8 +94,14 @@ const savings = ref<SavingsReport | null>(null)
 const loading = ref(true)
 const error = ref('')
 
-const backendUri = ref('')
-const backendBusy = ref(false)
+const connections = ref<Connection[]>([])
+const selectedConnectionId = ref<string | null>(null)
+const connectionBusy = ref(false)
+const newConnName = ref('')
+const newConnUri = ref('')
+const updateUri = ref('')
+const deleteConnTarget = ref<string | null>(null)
+const deleteConnOpen = ref(false)
 
 const defaultTtl = ref(60)
 const defaultsBusy = ref(false)
@@ -166,13 +173,52 @@ async function loadPolicy() {
   }
 }
 
-async function loadTokens() {
+const selectedConnection = computed(() =>
+  connections.value.find(c => c.id === selectedConnectionId.value) || null,
+)
+
+async function loadConnections() {
   try {
-    tokens.value = await api.listTokens(tenantId.value)
+    connections.value = await api.listConnections(tenantId.value)
+    if (selectedConnectionId.value && !connections.value.some(c => c.id === selectedConnectionId.value)) {
+      selectedConnectionId.value = null
+      tokens.value = []
+    }
+    if (!selectedConnectionId.value && connections.value.length) {
+      selectedConnectionId.value = connections.value[0].id
+    }
+    if (selectedConnectionId.value) {
+      await loadTokens()
+    }
   }
   catch (e) {
-    toast.error(`Tokens: ${api.apiErrorMessage(e)}`)
+    toast.error(`Connections: ${api.apiErrorMessage(e)}`)
   }
+}
+
+async function loadTokens() {
+  if (!selectedConnectionId.value) {
+    tokens.value = []
+    return
+  }
+  try {
+    tokens.value = await api.listTokens(tenantId.value, selectedConnectionId.value)
+  }
+  catch (e) {
+    toast.error(`Proxy access: ${api.apiErrorMessage(e)}`)
+  }
+}
+
+async function loadConnectionTab() {
+  await loadConnections()
+}
+
+async function selectConnection(id: string) {
+  selectedConnectionId.value = id
+  issuedToken.value = null
+  updateUri.value = ''
+  tokenDesc.value = ''
+  await loadTokens()
 }
 
 async function loadSavings() {
@@ -247,7 +293,7 @@ async function onRevokeInvite(inviteId: string) {
 
 watch(tab, async (t) => {
   if (t === 'cache' && !policy.value) await loadPolicy()
-  if (t === 'tokens') await loadTokens()
+  if (t === 'backend') await loadConnectionTab()
   if (t === 'savings') await loadSavings()
   if (t === 'members') await loadMembers()
 })
@@ -257,36 +303,96 @@ onMounted(async () => {
   await loadPolicy()
 })
 
-async function saveBackend() {
-  if (!backendUri.value.trim()) {
+async function createConnection() {
+  const name = newConnName.value.trim()
+  const uri = newConnUri.value.trim()
+  if (!name) {
+    toast.error('Name is required')
+    return
+  }
+  if (!uri) {
     toast.error('MongoDB URI is required')
     return
   }
-  backendBusy.value = true
+  connectionBusy.value = true
   try {
-    await api.setBackend(tenantId.value, backendUri.value.trim())
-    backendUri.value = ''
-    toast.success('Backend URI stored (encrypted at rest). Never shown again via API.')
+    const c = await api.createConnection(tenantId.value, name, uri)
+    newConnName.value = ''
+    newConnUri.value = ''
+    toast.success(`Connection “${c.name}” created (URI encrypted at rest).`)
+    selectedConnectionId.value = c.id
+    await loadConnections()
   }
   catch (e) {
     toast.error(api.apiErrorMessage(e))
   }
   finally {
-    backendBusy.value = false
+    connectionBusy.value = false
   }
 }
 
-async function testBackend() {
-  backendBusy.value = true
+async function saveConnectionUri() {
+  if (!selectedConnectionId.value) return
+  if (!updateUri.value.trim()) {
+    toast.error('MongoDB URI is required')
+    return
+  }
+  connectionBusy.value = true
   try {
-    const res = await api.testBackend(tenantId.value)
-    toast.success(res.status || 'Connection successful')
+    await api.updateConnection(tenantId.value, selectedConnectionId.value, { uri: updateUri.value.trim() })
+    updateUri.value = ''
+    toast.success('Source URI updated (encrypted). Never shown again via API.')
+    await loadConnections()
   }
   catch (e) {
     toast.error(api.apiErrorMessage(e))
   }
   finally {
-    backendBusy.value = false
+    connectionBusy.value = false
+  }
+}
+
+async function testSelectedConnection() {
+  if (!selectedConnectionId.value) return
+  connectionBusy.value = true
+  try {
+    const res = await api.testConnection(tenantId.value, selectedConnectionId.value)
+    toast.success(res.status || 'Connection successful')
+    await loadConnections()
+  }
+  catch (e) {
+    toast.error(api.apiErrorMessage(e))
+  }
+  finally {
+    connectionBusy.value = false
+  }
+}
+
+function confirmDeleteConnection(id: string) {
+  deleteConnTarget.value = id
+  deleteConnOpen.value = true
+}
+
+async function deleteConnection() {
+  if (!deleteConnTarget.value) return
+  connectionBusy.value = true
+  try {
+    await api.deleteConnection(tenantId.value, deleteConnTarget.value)
+    toast.success('Connection deleted')
+    if (selectedConnectionId.value === deleteConnTarget.value) {
+      selectedConnectionId.value = null
+      issuedToken.value = null
+      tokens.value = []
+    }
+    await loadConnections()
+  }
+  catch (e) {
+    toast.error(api.apiErrorMessage(e))
+  }
+  finally {
+    connectionBusy.value = false
+    deleteConnOpen.value = false
+    deleteConnTarget.value = null
   }
 }
 
@@ -374,13 +480,18 @@ function effectiveTtl(row: { ttlSeconds?: number }) {
 }
 
 async function issueToken() {
+  if (!selectedConnectionId.value) return
   tokenBusy.value = true
   issuedToken.value = null
   try {
-    issuedToken.value = await api.issueToken(tenantId.value, tokenDesc.value.trim() || undefined)
+    issuedToken.value = await api.issueToken(
+      tenantId.value,
+      selectedConnectionId.value,
+      tokenDesc.value.trim() || undefined,
+    )
     tokenDesc.value = ''
     await loadTokens()
-    toast.warning('Copy the raw token now — it is only shown once.')
+    toast.warning('Copy the proxy connection URI now — it is only shown once.')
   }
   catch (e) {
     toast.error(api.apiErrorMessage(e))
@@ -388,6 +499,14 @@ async function issueToken() {
   finally {
     tokenBusy.value = false
   }
+}
+
+function issuedProxyUri(): string {
+  const issued = issuedToken.value
+  if (!issued) return ''
+  if (issued.proxyConnectionUri) return issued.proxyConnectionUri
+  const endpoint = '127.0.0.1:27018'
+  return `mongodb://${encodeURIComponent(tenantId.value)}:${encodeURIComponent(issued.rawToken)}@${endpoint}/?authMechanism=PLAIN&authSource=$external`
 }
 
 function confirmRevoke(tokenId: string) {
@@ -400,7 +519,7 @@ async function revokeToken() {
   try {
     await api.revokeToken(revokeTarget.value)
     await loadTokens()
-    toast.success('Token revoked')
+    toast.success('Proxy access revoked')
   }
   catch (e) {
     toast.error(api.apiErrorMessage(e))
@@ -535,7 +654,7 @@ async function confirmDeleteOrg() {
       <Alert v-else-if="myRole === 'admin'">
         <AlertTitle>Admin access</AlertTitle>
         <AlertDescription>
-          You can manage backends, caching, tokens, and members. Only an
+          You can manage the connection, caching, and members. Only an
           <strong>owner</strong> can delete this organization.
         </AlertDescription>
       </Alert>
@@ -545,7 +664,6 @@ async function confirmDeleteOrg() {
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="backend">Connection</TabsTrigger>
           <TabsTrigger value="cache">Caching</TabsTrigger>
-          <TabsTrigger value="tokens">Tokens</TabsTrigger>
           <TabsTrigger value="members">Members</TabsTrigger>
           <TabsTrigger value="invalidate">Invalidate</TabsTrigger>
           <TabsTrigger value="savings">Savings</TabsTrigger>
@@ -624,13 +742,13 @@ async function confirmDeleteOrg() {
             </CardContent>
             <CardFooter class="flex flex-wrap gap-2 border-t border-border/60 pt-4">
               <Button variant="outline" size="sm" @click="tab = 'backend'">
-                {{ canManage ? 'Configure backend' : 'View connection' }}
+                {{ canManage ? 'Configure connection' : 'View connection' }}
               </Button>
               <Button variant="outline" size="sm" @click="tab = 'cache'">
                 {{ canManage ? 'Configure caching' : 'View caching' }}
               </Button>
-              <Button v-if="canManage" variant="outline" size="sm" @click="tab = 'tokens'">
-                Issue token
+              <Button v-if="canManage" variant="outline" size="sm" @click="tab = 'backend'">
+                Get proxy URI
               </Button>
               <Button variant="outline" size="sm" @click="tab = 'members'">
                 {{ canManage ? 'Manage members' : 'View members' }}
@@ -645,46 +763,234 @@ async function confirmDeleteOrg() {
           </Card>
         </TabsContent>
 
-        <!-- Backend -->
-        <TabsContent value="backend">
+        <!-- Connections (many source Mongo + proxy access per connection) -->
+        <TabsContent value="backend" class="flex flex-col gap-4">
           <Card>
             <CardHeader>
-              <CardTitle>MongoDB backend connection</CardTitle>
+              <CardTitle>Source connections</CardTitle>
               <CardDescription>
-                Store this organization's real MongoDB URI. It is encrypted at rest with
-                <code class="font-mono text-xs">NANCE_MASTER_KEY</code> and never returned by the API.
-                <span v-if="isReadOnly"> Members can test connectivity but cannot change the URI.</span>
+                An organization can have multiple named MongoDB sources (e.g. prod, staging).
+                Each has its own encrypted URI and proxy access credentials.
+                Apps never use the source URI — they use a <strong>proxy connection URI</strong> issued per connection.
               </CardDescription>
             </CardHeader>
-            <CardContent>
-              <FieldGroup>
-                <Field>
-                  <FieldLabel for="backend-uri">Connection URI</FieldLabel>
+            <CardContent class="flex flex-col gap-4">
+              <Empty v-if="!connections.length" class="border border-dashed py-8">
+                <EmptyHeader>
+                  <EmptyTitle>No connections yet</EmptyTitle>
+                  <EmptyDescription>
+                    Add a source MongoDB connection to start issuing proxy access.
+                  </EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+
+              <div v-else class="flex flex-col gap-2">
+                <button
+                  v-for="c in connections"
+                  :key="c.id"
+                  type="button"
+                  class="flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left transition-colors"
+                  :class="c.id === selectedConnectionId
+                    ? 'border-primary bg-primary/5'
+                    : 'border-border/80 hover:bg-muted/40'"
+                  @click="selectConnection(c.id)"
+                >
+                  <div class="flex flex-col gap-0.5">
+                    <span class="text-sm font-medium">{{ c.name }}</span>
+                    <span class="font-mono text-xs text-muted-foreground">{{ c.id }}</span>
+                  </div>
+                  <div class="flex flex-wrap items-center gap-2">
+                    <Badge v-if="c.lastValidatedAt" variant="default">validated</Badge>
+                    <Badge v-else variant="secondary">not tested</Badge>
+                    <span class="text-xs text-muted-foreground">{{ formatDate(c.created_at) }}</span>
+                  </div>
+                </button>
+              </div>
+
+              <template v-if="canManage">
+                <div class="flex flex-col gap-3 border-t border-border/60 pt-4">
+                  <p class="wire-label">Add connection</p>
+                  <div class="grid gap-3 sm:grid-cols-2">
+                    <Field class="gap-1.5">
+                      <FieldLabel for="new-conn-name">Name</FieldLabel>
+                      <Input
+                        id="new-conn-name"
+                        v-model="newConnName"
+                        placeholder="prod, staging, …"
+                        :disabled="connectionBusy"
+                      />
+                    </Field>
+                    <Field class="gap-1.5 sm:col-span-2">
+                      <FieldLabel for="new-conn-uri">Source MongoDB URI</FieldLabel>
+                      <Input
+                        id="new-conn-uri"
+                        v-model="newConnUri"
+                        class="font-mono"
+                        type="password"
+                        placeholder="mongodb://user:pass@host:27017/db?…"
+                        autocomplete="off"
+                        :disabled="connectionBusy"
+                      />
+                    </Field>
+                  </div>
+                  <Button class="w-fit" :disabled="connectionBusy" @click="createConnection">
+                    <Spinner v-if="connectionBusy" data-icon="inline-start" />
+                    {{ connectionBusy ? 'Working…' : 'Add connection' }}
+                  </Button>
+                </div>
+              </template>
+            </CardContent>
+          </Card>
+
+          <template v-if="selectedConnection">
+            <Card>
+              <CardHeader>
+                <CardTitle>{{ selectedConnection.name }}</CardTitle>
+                <CardDescription>
+                  Update the encrypted source URI or test connectivity.
+                  <span class="font-mono text-xs">{{ selectedConnection.id }}</span>
+                </CardDescription>
+              </CardHeader>
+              <CardContent class="flex flex-col gap-4">
+                <div class="flex flex-wrap items-center gap-2 text-sm">
+                  <Badge v-if="selectedConnection.lastValidatedAt">
+                    last validated {{ formatDate(selectedConnection.lastValidatedAt) }}
+                  </Badge>
+                  <Badge v-else variant="secondary">not tested yet</Badge>
+                </div>
+                <Field v-if="canManage" class="gap-1.5">
+                  <FieldLabel for="update-uri">Replace source URI</FieldLabel>
                   <Input
-                    id="backend-uri"
-                    v-model="backendUri"
+                    id="update-uri"
+                    v-model="updateUri"
                     class="font-mono"
                     type="password"
-                    placeholder="mongodb://user:pass@host:27017/db?…"
+                    placeholder="mongodb://…"
                     autocomplete="off"
-                    :disabled="isReadOnly || backendBusy"
+                    :disabled="connectionBusy"
                   />
-                  <FieldDescription>
-                    Paste a full MongoDB connection string. Leave blank and use Test if already configured.
-                  </FieldDescription>
+                  <FieldDescription>Leave blank unless rotating the source cluster credentials.</FieldDescription>
                 </Field>
-              </FieldGroup>
-            </CardContent>
-            <CardFooter class="flex flex-wrap gap-2 border-t border-border/60 pt-4">
-              <Button v-if="canManage" :disabled="backendBusy" @click="saveBackend">
-                <Spinner v-if="backendBusy" data-icon="inline-start" />
-                {{ backendBusy ? 'Working…' : 'Save encrypted URI' }}
-              </Button>
-              <Button variant="outline" :disabled="backendBusy" @click="testBackend">
-                Test connection
-              </Button>
-            </CardFooter>
-          </Card>
+              </CardContent>
+              <CardFooter class="flex flex-wrap gap-2 border-t border-border/60 pt-4">
+                <Button
+                  v-if="canManage"
+                  :disabled="connectionBusy || !updateUri.trim()"
+                  @click="saveConnectionUri"
+                >
+                  Save new URI
+                </Button>
+                <Button variant="outline" :disabled="connectionBusy" @click="testSelectedConnection">
+                  Test connection
+                </Button>
+                <Button
+                  v-if="canManage"
+                  variant="destructive"
+                  :disabled="connectionBusy"
+                  @click="confirmDeleteConnection(selectedConnection.id)"
+                >
+                  <Trash2Icon data-icon="inline-start" />
+                  Delete connection
+                </Button>
+              </CardFooter>
+            </Card>
+
+            <Card v-if="canManage">
+              <CardHeader>
+                <CardTitle>Proxy access</CardTitle>
+                <CardDescription>
+                  Credentials for this connection only. Clients use the proxy URI (username = org id);
+                  traffic is routed to this source MongoDB.
+                </CardDescription>
+              </CardHeader>
+              <CardContent class="flex flex-col gap-4">
+                <div class="flex flex-wrap items-end gap-3">
+                  <Field class="min-w-48 flex-1">
+                    <FieldLabel>Label (optional)</FieldLabel>
+                    <Input
+                      v-model="tokenDesc"
+                      placeholder="ci-bot, local-dev, …"
+                      :disabled="tokenBusy"
+                    />
+                  </Field>
+                  <Button :disabled="tokenBusy" @click="issueToken">
+                    <Spinner v-if="tokenBusy" data-icon="inline-start" />
+                    {{ tokenBusy ? 'Creating…' : 'Create access' }}
+                  </Button>
+                </div>
+
+                <div v-if="issuedToken" class="token-reveal">
+                  <p class="wire-label text-amber-500">Proxy connection URI — copy now, shown only once</p>
+                  <code class="block break-all">{{ issuedProxyUri() }}</code>
+                  <div class="mt-3 flex flex-wrap gap-2">
+                    <Button variant="outline" size="sm" @click="copyText(issuedProxyUri())">
+                      <CopyIcon data-icon="inline-start" />
+                      Copy proxy URI
+                    </Button>
+                    <Button variant="ghost" size="sm" @click="copyText(issuedToken!.rawToken)">
+                      Copy raw token
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            <Alert v-else>
+              <KeyRoundIcon />
+              <AlertTitle>Read-only for proxy access</AlertTitle>
+              <AlertDescription>
+                Members can list credentials; only admins and owners can create or revoke them.
+              </AlertDescription>
+            </Alert>
+
+            <Card class="overflow-hidden p-0">
+              <CardHeader class="border-b border-border/60 px-6 py-4">
+                <CardTitle class="text-base">Active credentials — {{ selectedConnection.name }}</CardTitle>
+              </CardHeader>
+              <Empty v-if="!tokens.length" class="py-10">
+                <EmptyHeader>
+                  <EmptyMedia variant="icon">
+                    <KeyRoundIcon />
+                  </EmptyMedia>
+                  <EmptyTitle>No proxy access yet</EmptyTitle>
+                  <EmptyDescription>
+                    Create access to get a proxy connection URI for this source.
+                  </EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+              <Table v-else>
+                <TableHeader>
+                  <TableRow class="hover:bg-transparent">
+                    <TableHead>ID</TableHead>
+                    <TableHead>Label</TableHead>
+                    <TableHead>Created</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead class="w-24" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  <TableRow v-for="tok in tokens" :key="tok.id">
+                    <TableCell class="font-mono text-xs">{{ tok.id }}</TableCell>
+                    <TableCell>{{ tok.description || '—' }}</TableCell>
+                    <TableCell class="text-sm text-muted-foreground">{{ formatDate(tok.created_at) }}</TableCell>
+                    <TableCell>
+                      <Badge v-if="tok.revoked_at" variant="destructive">revoked</Badge>
+                      <Badge v-else>active</Badge>
+                    </TableCell>
+                    <TableCell>
+                      <Button
+                        v-if="!tok.revoked_at && canManage"
+                        variant="destructive"
+                        size="sm"
+                        @click="confirmRevoke(tok.id)"
+                      >
+                        Revoke
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                </TableBody>
+              </Table>
+            </Card>
+          </template>
         </TabsContent>
 
         <!-- Caching -->
@@ -872,103 +1178,6 @@ async function confirmDeleteOrg() {
                 </div>
               </template>
             </CardContent>
-          </Card>
-        </TabsContent>
-
-        <!-- Tokens -->
-        <TabsContent value="tokens" class="flex flex-col gap-4">
-          <Card v-if="canManage">
-            <CardHeader>
-              <CardTitle>Issue access token</CardTitle>
-              <CardDescription>
-                Tokens authenticate clients to the data-plane proxy (username = tenant ID, password = raw token,
-                <code class="font-mono text-xs">authMechanism=PLAIN</code>). The raw secret is returned only once.
-              </CardDescription>
-            </CardHeader>
-            <CardContent class="flex flex-col gap-4">
-              <div class="flex flex-wrap items-end gap-3">
-                <Field class="min-w-48 flex-1">
-                  <FieldLabel>Description (optional)</FieldLabel>
-                  <Input v-model="tokenDesc" placeholder="ci-bot, local-dev, …" :disabled="tokenBusy" />
-                </Field>
-                <Button :disabled="tokenBusy" @click="issueToken">
-                  <Spinner v-if="tokenBusy" data-icon="inline-start" />
-                  {{ tokenBusy ? 'Issuing…' : 'Issue token' }}
-                </Button>
-              </div>
-
-              <div v-if="issuedToken" class="token-reveal">
-                <p class="wire-label text-amber-500">Raw token — copy now, shown only once</p>
-                <code>{{ issuedToken.rawToken }}</code>
-                <div class="mt-3 flex flex-wrap gap-2">
-                  <Button variant="outline" size="sm" @click="copyText(issuedToken!.rawToken)">
-                    <CopyIcon data-icon="inline-start" />
-                    Copy token
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    @click="copyText(`mongodb://${tenantId}:${issuedToken!.rawToken}@127.0.0.1:27018/mydb?authMechanism=PLAIN&authSource=$external`)"
-                  >
-                    Copy sample URI
-                  </Button>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-          <Alert v-else>
-            <KeyRoundIcon />
-            <AlertTitle>Read-only for tokens</AlertTitle>
-            <AlertDescription>
-              Members can list tokens but only admins and owners can issue or revoke them.
-            </AlertDescription>
-          </Alert>
-
-          <Card class="overflow-hidden p-0">
-            <CardHeader class="border-b border-border/60 px-6 py-4">
-              <CardTitle class="text-base">Issued tokens</CardTitle>
-            </CardHeader>
-            <Empty v-if="!tokens.length" class="py-10">
-              <EmptyHeader>
-                <EmptyMedia variant="icon">
-                  <KeyRoundIcon />
-                </EmptyMedia>
-                <EmptyTitle>No tokens yet</EmptyTitle>
-                <EmptyDescription>Issue a token to authenticate clients to the proxy.</EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-            <Table v-else>
-              <TableHeader>
-                <TableRow class="hover:bg-transparent">
-                  <TableHead>Token ID</TableHead>
-                  <TableHead>Description</TableHead>
-                  <TableHead>Created</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead class="w-24" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                <TableRow v-for="tok in tokens" :key="tok.id">
-                  <TableCell class="font-mono text-xs">{{ tok.id }}</TableCell>
-                  <TableCell>{{ tok.description || '—' }}</TableCell>
-                  <TableCell class="text-sm text-muted-foreground">{{ formatDate(tok.created_at) }}</TableCell>
-                  <TableCell>
-                    <Badge v-if="tok.revoked_at" variant="destructive">revoked</Badge>
-                    <Badge v-else>active</Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Button
-                      v-if="!tok.revoked_at && canManage"
-                      variant="destructive"
-                      size="sm"
-                      @click="confirmRevoke(tok.id)"
-                    >
-                      Revoke
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
           </Card>
         </TabsContent>
 
@@ -1258,15 +1467,32 @@ async function confirmDeleteOrg() {
     <AlertDialog v-model:open="revokeOpen">
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Revoke this token?</AlertDialogTitle>
+          <AlertDialogTitle>Revoke this proxy access?</AlertDialogTitle>
           <AlertDialogDescription>
-            Clients using it will fail auth immediately. This cannot be undone.
+            Clients using this connection URI will fail auth immediately. This cannot be undone.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
           <AlertDialogAction variant="destructive" @click="revokeToken">
-            Revoke token
+            Revoke access
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+
+    <AlertDialog v-model:open="deleteConnOpen">
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Delete this connection?</AlertDialogTitle>
+          <AlertDialogDescription>
+            The source URI and all proxy access credentials for this connection will be removed permanently.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction variant="destructive" @click="deleteConnection">
+            Delete connection
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

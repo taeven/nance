@@ -27,11 +27,11 @@ func TestCacheKey_KeyOrderIndependent(t *testing.T) {
 		{Key: "filter", Value: bson.D{{Key: "region", Value: "us"}, {Key: "status", Value: "shipped"}}},
 		{Key: "$db", Value: "mydb"},
 	})
-	ka, err := CacheKey("t1", "mydb", "orders", "find", a, 1)
+	ka, err := CacheKey("t1", "c1", "mydb", "orders", "find", a, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	kb, err := CacheKey("t1", "mydb", "orders", "find", b, 1)
+	kb, err := CacheKey("t1", "c1", "mydb", "orders", "find", b, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,8 +47,8 @@ func TestCacheKey_CommentIgnored(t *testing.T) {
 		{Key: "$db", Value: "d"},
 	}
 	withComment := append(base, bson.E{Key: "$comment", Value: "trace-xyz"})
-	ka, _ := CacheKey("t", "d", "c", "find", mustRaw(t, base), 0)
-	kb, _ := CacheKey("t", "d", "c", "find", mustRaw(t, withComment), 0)
+	ka, _ := CacheKey("t", "c1", "d", "c", "find", mustRaw(t, base), 0)
+	kb, _ := CacheKey("t", "c1", "d", "c", "find", mustRaw(t, withComment), 0)
 	if ka != kb {
 		t.Fatalf("comment must not affect key")
 	}
@@ -57,8 +57,8 @@ func TestCacheKey_CommentIgnored(t *testing.T) {
 func TestCacheKey_LimitAffectsKey(t *testing.T) {
 	a := mustRaw(t, bson.D{{Key: "find", Value: "c"}, {Key: "limit", Value: int32(10)}, {Key: "$db", Value: "d"}})
 	b := mustRaw(t, bson.D{{Key: "find", Value: "c"}, {Key: "limit", Value: int32(20)}, {Key: "$db", Value: "d"}})
-	ka, _ := CacheKey("t", "d", "c", "find", a, 1)
-	kb, _ := CacheKey("t", "d", "c", "find", b, 1)
+	ka, _ := CacheKey("t", "c1", "d", "c", "find", a, 1)
+	kb, _ := CacheKey("t", "c1", "d", "c", "find", b, 1)
 	if ka == kb {
 		t.Fatal("different limits must produce different keys")
 	}
@@ -66,8 +66,8 @@ func TestCacheKey_LimitAffectsKey(t *testing.T) {
 
 func TestCacheKey_TenantIsolation(t *testing.T) {
 	raw := mustRaw(t, bson.D{{Key: "find", Value: "c"}, {Key: "$db", Value: "d"}})
-	ka, _ := CacheKey("tenantA", "d", "c", "find", raw, 1)
-	kb, _ := CacheKey("tenantB", "d", "c", "find", raw, 1)
+	ka, _ := CacheKey("tenantA", "c1", "d", "c", "find", raw, 1)
+	kb, _ := CacheKey("tenantB", "c1", "d", "c", "find", raw, 1)
 	if ka == kb {
 		t.Fatal("tenants must not share keys")
 	}
@@ -78,8 +78,8 @@ func TestCacheKey_TenantIsolation(t *testing.T) {
 
 func TestCacheKey_VersionInKey(t *testing.T) {
 	raw := mustRaw(t, bson.D{{Key: "find", Value: "c"}, {Key: "$db", Value: "d"}})
-	ka, _ := CacheKey("t", "d", "c", "find", raw, 1)
-	kb, _ := CacheKey("t", "d", "c", "find", raw, 2)
+	ka, _ := CacheKey("t", "c1", "d", "c", "find", raw, 1)
+	kb, _ := CacheKey("t", "c1", "d", "c", "find", raw, 2)
 	if ka == kb {
 		t.Fatal("cache key version must change key")
 	}
@@ -115,8 +115,8 @@ func TestIsCacheableCommand(t *testing.T) {
 func TestNormalize_Int32VsInt64(t *testing.T) {
 	a := mustRaw(t, bson.D{{Key: "find", Value: "c"}, {Key: "limit", Value: int32(5)}})
 	b := mustRaw(t, bson.D{{Key: "find", Value: "c"}, {Key: "limit", Value: int64(5)}})
-	ka, _ := CacheKey("t", "d", "c", "find", a, 0)
-	kb, _ := CacheKey("t", "d", "c", "find", b, 0)
+	ka, _ := CacheKey("t", "c1", "d", "c", "find", a, 0)
+	kb, _ := CacheKey("t", "c1", "d", "c", "find", b, 0)
 	if ka != kb {
 		t.Fatal("int32 and int64 limits should normalize to same key")
 	}

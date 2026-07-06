@@ -236,10 +236,12 @@ func extractPayload(body bson.Raw) ([]byte, error) {
 
 func (h *Handler) handlePassthrough(ctx context.Context, cs *ConnState, msg *wire.Msg, info command.Info) (any, error) {
 	tenantID := ""
+	connectionID := ""
 	if cs.Tenant != nil {
 		tenantID = cs.Tenant.TenantID
+		connectionID = cs.Tenant.ConnectionID
 	}
-	if tenantID == "" {
+	if tenantID == "" || connectionID == "" {
 		return command.NotAuthorized("no tenant context"), nil
 	}
 
@@ -271,18 +273,18 @@ func (h *Handler) handlePassthrough(ctx context.Context, cs *ConnState, msg *wir
 
 	// Phase 2: try read-through cache only when the client used the _cache suffix
 	if useCache {
-		if reply, handled := h.tryCacheRead(ctx, cs, tenantID, dbName, collName, nsLabel, cmdLower, msg, info, cmdDoc); handled {
+		if reply, handled := h.tryCacheRead(ctx, cs, tenantID, connectionID, dbName, collName, nsLabel, cmdLower, msg, info, cmdDoc); handled {
 			return reply, nil
 		}
 	}
 
-	client, err := h.deps.Pool.Get(ctx, tenantID)
+	client, err := h.deps.Pool.Get(ctx, connectionID)
 	if err != nil {
-		h.deps.Log.Error("backend pool error", "tenant", tenantID, "error", err)
+		h.deps.Log.Error("backend pool error", "tenant", tenantID, "connection", connectionID, "error", err)
 		telemetry.ProxyBackendErrors.WithLabelValues(tenantID).Inc()
 		return command.ErrorReply(6, "HostUnreachable", "failed to reach tenant backend: "+err.Error()), nil
 	}
-	defer h.deps.Pool.Release(tenantID)
+	defer h.deps.Pool.Release(connectionID)
 
 	// Cursor-producing reads: use collection helpers so we can manage getMore
 	var reply any
@@ -318,7 +320,7 @@ func (h *Handler) handlePassthrough(ctx context.Context, cs *ConnState, msg *wir
 
 	// Populate cache only for opt-in (_cache suffix) reads that missed the coordinator path
 	if useCache && info.Kind == command.KindRead && collName != "" {
-		h.maybePopulateCache(ctx, tenantID, dbName, collName, nsLabel, cmdLower, msg.Body, info, reply)
+		h.maybePopulateCache(ctx, tenantID, connectionID, dbName, collName, nsLabel, cmdLower, msg.Body, info, reply)
 	}
 
 	return reply, nil
@@ -331,7 +333,7 @@ func (h *Handler) handlePassthrough(ctx context.Context, cs *ConnState, msg *wir
 func (h *Handler) tryCacheRead(
 	ctx context.Context,
 	cs *ConnState,
-	tenantID, dbName, collName, nsLabel, cmdLower string,
+	tenantID, connectionID, dbName, collName, nsLabel, cmdLower string,
 	msg *wire.Msg,
 	info command.Info,
 	cmdDoc bson.D,
@@ -351,7 +353,7 @@ func (h *Handler) tryCacheRead(
 		dec = policy.Decision{Enabled: true, TTL: time.Duration(policy.DefaultTTLSeconds) * time.Second, MaxResultBytes: 1 << 20, CacheKeyVersion: 1}
 	}
 
-	key, err := cache.CacheKey(tenantID, dbName, collName, info.Name, msg.Body, dec.CacheKeyVersion)
+	key, err := cache.CacheKey(tenantID, connectionID, dbName, collName, info.Name, msg.Body, dec.CacheKeyVersion)
 	if err != nil {
 		telemetry.CacheBypass.WithLabelValues(tenantID, "bad_key").Inc()
 		return nil, false
@@ -360,11 +362,11 @@ func (h *Handler) tryCacheRead(
 	start := time.Now()
 	payload, hit, err := h.deps.Cache.GetOrLoad(ctx, key, func(ctx context.Context) ([]byte, error) {
 		// Execute backend inside singleflight on miss
-		client, err := h.deps.Pool.Get(ctx, tenantID)
+		client, err := h.deps.Pool.Get(ctx, connectionID)
 		if err != nil {
 			return nil, err
 		}
-		defer h.deps.Pool.Release(tenantID)
+		defer h.deps.Pool.Release(connectionID)
 		var backendReply any
 		switch cmdLower {
 		case "find":
@@ -557,7 +559,7 @@ func isErrorReply(reply any) bool {
 // Caller must only invoke for _cache-suffix opt-in reads; collName is the real backend collection.
 func (h *Handler) maybePopulateCache(
 	ctx context.Context,
-	tenantID, dbName, collName, nsLabel, cmdLower string,
+	tenantID, connectionID, dbName, collName, nsLabel, cmdLower string,
 	raw bson.Raw,
 	info command.Info,
 	reply any,
@@ -574,7 +576,7 @@ func (h *Handler) maybePopulateCache(
 	} else {
 		dec = policy.Decision{Enabled: true, TTL: time.Duration(policy.DefaultTTLSeconds) * time.Second, MaxResultBytes: 1 << 20, CacheKeyVersion: 1}
 	}
-	key, err := cache.CacheKey(tenantID, dbName, collName, info.Name, raw, dec.CacheKeyVersion)
+	key, err := cache.CacheKey(tenantID, connectionID, dbName, collName, info.Name, raw, dec.CacheKeyVersion)
 	if err != nil {
 		return
 	}

@@ -2,6 +2,7 @@ import type {
   AuthVerifyResponse,
   CachePolicy,
   CollectionPolicy,
+  Connection,
   InvalidateRequest,
   InvalidateResponse,
   IssueTokenResponse,
@@ -156,19 +157,39 @@ export function useAcceleratorApi() {
     })
   }
 
-  async function setBackend(tenantId: string, uri: string) {
-    return $fetch<StatusResponse>(`/api/tenants/${encodeURIComponent(tenantId)}/backend`, {
-      method: 'POST',
+  async function listConnections(tenantId: string) {
+    return $fetch<Connection[]>(`/api/tenants/${encodeURIComponent(tenantId)}/connections`, {
       headers: authHeaders(),
-      body: { uri },
     })
   }
 
-  async function testBackend(tenantId: string) {
-    return $fetch<StatusResponse>(`/api/tenants/${encodeURIComponent(tenantId)}/backend/test`, {
+  async function createConnection(tenantId: string, name: string, uri: string) {
+    return $fetch<Connection>(`/api/tenants/${encodeURIComponent(tenantId)}/connections`, {
       method: 'POST',
       headers: authHeaders(),
+      body: { name, uri },
     })
+  }
+
+  async function updateConnection(tenantId: string, connectionId: string, body: { name?: string, uri?: string }) {
+    return $fetch<Connection>(
+      `/api/tenants/${encodeURIComponent(tenantId)}/connections/${encodeURIComponent(connectionId)}`,
+      { method: 'PUT', headers: authHeaders(), body },
+    )
+  }
+
+  async function deleteConnection(tenantId: string, connectionId: string) {
+    return $fetch<StatusResponse>(
+      `/api/tenants/${encodeURIComponent(tenantId)}/connections/${encodeURIComponent(connectionId)}`,
+      { method: 'DELETE', headers: authHeaders() },
+    )
+  }
+
+  async function testConnection(tenantId: string, connectionId: string) {
+    return $fetch<StatusResponse>(
+      `/api/tenants/${encodeURIComponent(tenantId)}/connections/${encodeURIComponent(connectionId)}/test`,
+      { method: 'POST', headers: authHeaders() },
+    )
   }
 
   async function getPolicy(tenantId: string) {
@@ -192,18 +213,22 @@ export function useAcceleratorApi() {
     )
   }
 
-  async function listTokens(tenantId: string) {
-    return $fetch<Token[]>(`/api/tenants/${encodeURIComponent(tenantId)}/tokens`, {
-      headers: authHeaders(),
-    })
+  async function listTokens(tenantId: string, connectionId: string) {
+    return $fetch<Token[]>(
+      `/api/tenants/${encodeURIComponent(tenantId)}/connections/${encodeURIComponent(connectionId)}/tokens`,
+      { headers: authHeaders() },
+    )
   }
 
-  async function issueToken(tenantId: string, description?: string) {
-    return $fetch<IssueTokenResponse>(`/api/tenants/${encodeURIComponent(tenantId)}/tokens`, {
-      method: 'POST',
-      headers: authHeaders(),
-      body: { description },
-    })
+  async function issueToken(tenantId: string, connectionId: string, description?: string) {
+    return $fetch<IssueTokenResponse>(
+      `/api/tenants/${encodeURIComponent(tenantId)}/connections/${encodeURIComponent(connectionId)}/tokens`,
+      {
+        method: 'POST',
+        headers: authHeaders(),
+        body: { description },
+      },
+    )
   }
 
   async function revokeToken(tokenId: string) {
@@ -252,8 +277,11 @@ export function useAcceleratorApi() {
     removeMember,
     requestDeleteOrg,
     confirmDeleteOrg,
-    setBackend,
-    testBackend,
+    listConnections,
+    createConnection,
+    updateConnection,
+    deleteConnection,
+    testConnection,
     getPolicy,
     setDefaultTtl,
     setCollectionPolicy,

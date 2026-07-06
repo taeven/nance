@@ -105,12 +105,12 @@ Details: [`apps/admin-dashboard/README.md`](apps/admin-dashboard/README.md).
 
 ### 3. Connect an app through the proxy
 
-Use **PLAIN** auth (SCRAM is not implemented on the proxy yet):
+In the dashboard **Connection** tab: add one or more named source Mongo URIs, then **Create access** on a connection and copy the **proxy connection URI** (shown once). The token selects which source is used. Or use **PLAIN** auth manually:
 
 - **Username** = organization / tenant id  
-- **Password** = proxy access token (`rawToken` shown once at issuance)  
+- **Password** = proxy access secret (`rawToken` / embedded in `proxyConnectionUri` at issuance)  
 - Example:  
-  `mongodb://demo:<rawToken>@127.0.0.1:27018/mydb?authMechanism=PLAIN&authSource=$external`
+  `mongodb://demo:<rawToken>@127.0.0.1:27018/?authMechanism=PLAIN&authSource=$external`
 
 Cached read example (real collection `orders`, 60s default TTL):
 

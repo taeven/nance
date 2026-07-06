@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -9,12 +10,15 @@ import (
 	"github.com/taeven/nance/accelerator/internal/model"
 )
 
+// ErrDuplicate is returned when a unique constraint would be violated (e.g. connection name).
+var ErrDuplicate = errors.New("duplicate")
+
 // MemoryStore is an in-memory Store for unit tests (not production).
 type MemoryStore struct {
 	mu sync.Mutex
 
 	tenants      map[string]*model.Tenant
-	backends     map[string]*model.TenantBackend
+	connections  map[string]*model.Connection // by connection id
 	policies     map[string]*model.CachePolicy
 	tokens       map[string]*tokenRow
 	users        map[string]*model.User // by id
@@ -51,7 +55,7 @@ type inviteRow struct {
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		tenants:      make(map[string]*model.Tenant),
-		backends:     make(map[string]*model.TenantBackend),
+		connections:  make(map[string]*model.Connection),
 		policies:     make(map[string]*model.CachePolicy),
 		tokens:       make(map[string]*tokenRow),
 		users:        make(map[string]*model.User),
@@ -102,9 +106,13 @@ func (m *MemoryStore) DeleteTenant(_ context.Context, id string) error {
 		return ErrNotFound
 	}
 	delete(m.tenants, id)
-	delete(m.backends, id)
 	delete(m.policies, id)
 	delete(m.members, id)
+	for cid, c := range m.connections {
+		if c.TenantID == id {
+			delete(m.connections, cid)
+		}
+	}
 	for iid, inv := range m.invites {
 		if inv.inv.TenantID == id {
 			delete(m.invites, iid)
@@ -118,37 +126,105 @@ func (m *MemoryStore) DeleteTenant(_ context.Context, id string) error {
 	return nil
 }
 
-func (m *MemoryStore) SetBackend(_ context.Context, tenantID string, ciphertext, nonce []byte, dekVersion string) error {
+func (m *MemoryStore) CreateConnection(_ context.Context, c *model.Connection) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	now := time.Now().UTC()
-	m.backends[tenantID] = &model.TenantBackend{
-		TenantID: tenantID, URICiphertext: ciphertext, Nonce: nonce, DEKVersion: dekVersion,
-		CreatedAt: now, UpdatedAt: now,
+	for _, existing := range m.connections {
+		if existing.TenantID == c.TenantID && strings.EqualFold(existing.Name, c.Name) {
+			return ErrDuplicate
+		}
+	}
+	cp := *c
+	if cp.URICiphertext != nil {
+		cp.URICiphertext = append([]byte(nil), c.URICiphertext...)
+	}
+	if cp.Nonce != nil {
+		cp.Nonce = append([]byte(nil), c.Nonce...)
+	}
+	m.connections[c.ID] = &cp
+	return nil
+}
+
+func (m *MemoryStore) UpdateConnectionURI(_ context.Context, connectionID string, ciphertext, nonce []byte, dekVersion string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.connections[connectionID]
+	if !ok {
+		return ErrNotFound
+	}
+	c.URICiphertext = append([]byte(nil), ciphertext...)
+	c.Nonce = append([]byte(nil), nonce...)
+	c.DEKVersion = dekVersion
+	c.UpdatedAt = time.Now().UTC()
+	return nil
+}
+
+func (m *MemoryStore) UpdateConnectionName(_ context.Context, connectionID, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.connections[connectionID]
+	if !ok {
+		return ErrNotFound
+	}
+	for _, existing := range m.connections {
+		if existing.ID != connectionID && existing.TenantID == c.TenantID && strings.EqualFold(existing.Name, name) {
+			return ErrDuplicate
+		}
+	}
+	c.Name = name
+	c.UpdatedAt = time.Now().UTC()
+	return nil
+}
+
+func (m *MemoryStore) GetConnection(_ context.Context, connectionID string) (*model.Connection, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.connections[connectionID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	cp := *c
+	return &cp, nil
+}
+
+func (m *MemoryStore) ListConnections(_ context.Context, tenantID string) ([]*model.Connection, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*model.Connection, 0)
+	for _, c := range m.connections {
+		if c.TenantID == tenantID {
+			cp := *c
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
+func (m *MemoryStore) DeleteConnection(_ context.Context, connectionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.connections[connectionID]; !ok {
+		return ErrNotFound
+	}
+	delete(m.connections, connectionID)
+	for tid, row := range m.tokens {
+		if row.tok.ConnectionID == connectionID {
+			delete(m.tokens, tid)
+		}
 	}
 	return nil
 }
 
-func (m *MemoryStore) GetBackend(_ context.Context, tenantID string) (*model.TenantBackend, error) {
+func (m *MemoryStore) UpdateConnectionValidated(_ context.Context, connectionID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	b, ok := m.backends[tenantID]
-	if !ok {
-		return nil, ErrNotFound
-	}
-	cp := *b
-	return &cp, nil
-}
-
-func (m *MemoryStore) UpdateBackendValidated(_ context.Context, tenantID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	b, ok := m.backends[tenantID]
+	c, ok := m.connections[connectionID]
 	if !ok {
 		return ErrNotFound
 	}
 	now := time.Now().UTC()
-	b.LastValidatedAt = &now
+	c.LastValidatedAt = &now
+	c.UpdatedAt = now
 	return nil
 }
 
@@ -217,6 +293,19 @@ func (m *MemoryStore) ListTokensForTenant(_ context.Context, tenantID string) ([
 	return out, nil
 }
 
+func (m *MemoryStore) ListTokensForConnection(_ context.Context, connectionID string) ([]*model.Token, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*model.Token, 0)
+	for _, row := range m.tokens {
+		if row.tok.ConnectionID == connectionID {
+			cp := *row.tok
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
 func (m *MemoryStore) ListActiveTokenHashes(_ context.Context, tenantID string) ([]TokenHashRow, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -224,13 +313,13 @@ func (m *MemoryStore) ListActiveTokenHashes(_ context.Context, tenantID string) 
 	now := time.Now().UTC()
 	for _, row := range m.tokens {
 		t := row.tok
-		if t.TenantID != tenantID || t.RevokedAt != nil {
+		if t.TenantID != tenantID || t.RevokedAt != nil || t.ConnectionID == "" {
 			continue
 		}
 		if t.ExpiresAt != nil && t.ExpiresAt.Before(now) {
 			continue
 		}
-		out = append(out, TokenHashRow{ID: t.ID, TokenHash: row.hash})
+		out = append(out, TokenHashRow{ID: t.ID, TokenHash: row.hash, ConnectionID: t.ConnectionID})
 	}
 	return out, nil
 }

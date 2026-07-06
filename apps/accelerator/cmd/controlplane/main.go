@@ -58,7 +58,7 @@ func main() {
 
 	// 4. Services
 	tenantSvc := service.NewTenantService(pgStore)
-	backendSvc := service.NewBackendService(pgStore, cryptoCfg)
+	connectionSvc := service.NewConnectionService(pgStore, cryptoCfg)
 	policySvc := service.NewPolicyService(pgStore)
 	// Optional Redis for explicit invalidation (same as proxies)
 	if addr := os.Getenv("NANCE_REDIS_ADDR"); addr != "" {
@@ -70,7 +70,7 @@ func main() {
 			logger.Warn("redis unavailable for control plane invalidation", "error", err)
 		}
 	}
-	tokenSvc := service.NewTokenService(pgStore)
+	tokenSvc := service.NewTokenService(pgStore).WithProxyPublicEndpoint(cfg.ProxyPublicEndpoint)
 	mailer := &service.LogMailer{Log: logger}
 	authSvc := service.NewAuthService(pgStore, mailer, logger)
 	orgSvc := service.NewOrgService(pgStore, mailer).WithInviteOnly(cfg.InviteOnly)
@@ -80,10 +80,11 @@ func main() {
 
 	// 5. HTTP server
 	pub := cfg.PlatformPublic()
-	handler := api.NewServer(tenantSvc, backendSvc, policySvc, tokenSvc, authSvc, orgSvc, handlers.PlatformPublic{
+	handler := api.NewServer(tenantSvc, connectionSvc, policySvc, tokenSvc, authSvc, orgSvc, handlers.PlatformPublic{
 		InviteOnly:          pub.InviteOnly,
 		AllowOrgCreation:    pub.AllowOrgCreation,
 		AllowAdminBootstrap: pub.AllowAdminBootstrap,
+		ProxyPublicEndpoint: pub.ProxyPublicEndpoint,
 	})
 
 	srv := &http.Server{

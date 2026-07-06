@@ -16,6 +16,10 @@ type Config struct {
 	// join organizations via invite. When enabled, normal users cannot create
 	// organizations (platform admin token can still create tenants for bootstrap).
 	InviteOnly bool
+
+	// ProxyPublicEndpoint is host[:port] used when building client proxy
+	// connection URIs (e.g. "127.0.0.1:27018" or "proxy.example.com:27018").
+	ProxyPublicEndpoint string
 }
 
 func Load() *Config {
@@ -34,13 +38,19 @@ func Load() *Config {
 		migrations = "./migrations"
 	}
 
+	proxyEndpoint := strings.TrimSpace(os.Getenv("NANCE_PROXY_PUBLIC_ENDPOINT"))
+	if proxyEndpoint == "" {
+		proxyEndpoint = "127.0.0.1:27018"
+	}
+
 	return &Config{
-		Port:         ":" + port,
-		DatabaseURL:  dbURL,
-		MasterKey:    os.Getenv("NANCE_MASTER_KEY"),
-		AdminToken:   os.Getenv("NANCE_ADMIN_TOKEN"),
-		MigrationDir: migrations,
-		InviteOnly:   envBool("NANCE_INVITE_ONLY", false),
+		Port:                ":" + port,
+		DatabaseURL:         dbURL,
+		MasterKey:           os.Getenv("NANCE_MASTER_KEY"),
+		AdminToken:          os.Getenv("NANCE_ADMIN_TOKEN"),
+		MigrationDir:        migrations,
+		InviteOnly:          envBool("NANCE_INVITE_ONLY", false),
+		ProxyPublicEndpoint: proxyEndpoint,
 	}
 }
 
@@ -54,14 +64,21 @@ type PlatformPublic struct {
 	AllowOrgCreation bool `json:"allowOrgCreation"` // false when invite-only for end users
 	// AllowOrgCreationByAdmin is always true for NANCE_ADMIN_TOKEN bootstrap.
 	AllowAdminBootstrap bool `json:"allowAdminBootstrap"`
+	// ProxyPublicEndpoint is host[:port] for building client proxy connection URIs.
+	ProxyPublicEndpoint string `json:"proxyPublicEndpoint"`
 }
 
 func (c *Config) PlatformPublic() PlatformPublic {
 	inviteOnly := c != nil && c.InviteOnly
+	endpoint := "127.0.0.1:27018"
+	if c != nil && c.ProxyPublicEndpoint != "" {
+		endpoint = c.ProxyPublicEndpoint
+	}
 	return PlatformPublic{
 		InviteOnly:          inviteOnly,
 		AllowOrgCreation:    !inviteOnly,
 		AllowAdminBootstrap: true,
+		ProxyPublicEndpoint: endpoint,
 	}
 }
 

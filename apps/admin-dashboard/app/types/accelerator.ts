@@ -68,6 +68,7 @@ export interface CachePolicy {
 export interface Token {
   id: string
   tenantId: string
+  connectionId?: string
   description?: string
   created_at: string
   expires_at?: string | null
@@ -78,8 +79,21 @@ export interface IssueTokenResponse {
   tokenId: string
   rawToken: string
   tenantId: string
+  connectionId?: string
   description?: string
   createdAt: string
+  /** Full proxy URI for clients (shown only once with rawToken). */
+  proxyConnectionUri?: string
+}
+
+/** Named source Mongo connection (URI never returned). */
+export interface Connection {
+  id: string
+  tenantId: string
+  name: string
+  lastValidatedAt?: string | null
+  created_at: string
+  updated_at: string
 }
 
 export interface StatusResponse {
@@ -111,4 +125,6 @@ export interface PlatformSettings {
   inviteOnly: boolean
   allowOrgCreation: boolean
   allowAdminBootstrap: boolean
+  /** host[:port] for building client proxy connection URIs */
+  proxyPublicEndpoint?: string
 }

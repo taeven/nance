@@ -14,7 +14,11 @@ import (
 func TestGetPlatformSettings(t *testing.T) {
 	ms := store.NewMemoryStore()
 	orgs := service.NewOrgService(ms, nil).WithInviteOnly(true)
-	h := NewHandlers(nil, nil, nil, nil, nil, orgs, PlatformPublic{InviteOnly: true, AllowOrgCreation: false})
+	h := NewHandlers(nil, nil, nil, nil, nil, orgs, PlatformPublic{
+		InviteOnly:          true,
+		AllowOrgCreation:    false,
+		ProxyPublicEndpoint: "proxy.example.com:27018",
+	})
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/platform", nil)
 	rr := httptest.NewRecorder()
 	h.GetPlatformSettings(rr, req)
@@ -25,6 +29,9 @@ func TestGetPlatformSettings(t *testing.T) {
 	_ = json.NewDecoder(rr.Body).Decode(&p)
 	if !p.InviteOnly || p.AllowOrgCreation {
 		t.Fatalf("%+v", p)
+	}
+	if p.ProxyPublicEndpoint != "proxy.example.com:27018" {
+		t.Fatalf("proxy endpoint: %+v", p)
 	}
 }
 

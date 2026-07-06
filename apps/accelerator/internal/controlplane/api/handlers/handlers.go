@@ -15,24 +15,25 @@ import (
 
 // PlatformPublic is JSON-safe instance metadata for self-hosters (no secrets).
 type PlatformPublic struct {
-	InviteOnly          bool `json:"inviteOnly"`
-	AllowOrgCreation    bool `json:"allowOrgCreation"`
-	AllowAdminBootstrap bool `json:"allowAdminBootstrap"`
+	InviteOnly          bool   `json:"inviteOnly"`
+	AllowOrgCreation    bool   `json:"allowOrgCreation"`
+	AllowAdminBootstrap bool   `json:"allowAdminBootstrap"`
+	ProxyPublicEndpoint string `json:"proxyPublicEndpoint"`
 }
 
 type Handlers struct {
-	tenants  *service.TenantService
-	backends *service.BackendService
-	policies *service.PolicyService
-	tokens   *service.TokenService
-	auth     *service.AuthService
-	orgs     *service.OrgService
-	platform PlatformPublic
+	tenants     *service.TenantService
+	connections *service.ConnectionService
+	policies    *service.PolicyService
+	tokens      *service.TokenService
+	auth        *service.AuthService
+	orgs        *service.OrgService
+	platform    PlatformPublic
 }
 
 func NewHandlers(
 	ts *service.TenantService,
-	bs *service.BackendService,
+	cs *service.ConnectionService,
 	ps *service.PolicyService,
 	toks *service.TokenService,
 	auth *service.AuthService,
@@ -45,13 +46,13 @@ func NewHandlers(
 	}
 	platform.AllowAdminBootstrap = true
 	return &Handlers{
-		tenants:  ts,
-		backends: bs,
-		policies: ps,
-		tokens:   toks,
-		auth:     auth,
-		orgs:     orgs,
-		platform: platform,
+		tenants:     ts,
+		connections: cs,
+		policies:    ps,
+		tokens:      toks,
+		auth:        auth,
+		orgs:        orgs,
+		platform:    platform,
 	}
 }
 
@@ -555,45 +556,150 @@ func (h *Handlers) ConfirmDeleteOrganization(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-// ===== Backend handlers =====
+// ===== Connections (multi source Mongo per org) =====
 
-func (h *Handlers) SetBackend(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) ListConnections(w http.ResponseWriter, r *http.Request) {
+	tenantID := chi.URLParam(r, "tenantId")
+	if err := h.ensureTenantAccess(r, tenantID); err != nil {
+		mapAuthErr(w, err)
+		return
+	}
+	list, err := h.connections.List(r.Context(), tenantID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (h *Handlers) CreateConnection(w http.ResponseWriter, r *http.Request) {
 	tenantID := chi.URLParam(r, "tenantId")
 	if err := h.ensureTenantAdmin(r, tenantID); err != nil {
 		mapAuthErr(w, err)
 		return
 	}
 	var req struct {
-		URI string `json:"uri"`
+		Name string `json:"name"`
+		URI  string `json:"uri"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if err := h.backends.SetBackend(r.Context(), tenantID, req.URI); err != nil {
-		if err == service.ErrTenantNotFound {
+	c, err := h.connections.Create(r.Context(), tenantID, req.Name, req.URI)
+	if err != nil {
+		if errors.Is(err, service.ErrTenantNotFound) {
 			writeError(w, http.StatusNotFound, "tenant not found")
+			return
+		}
+		if errors.Is(err, service.ErrDuplicateName) {
+			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusCreated, c)
 }
 
-func (h *Handlers) TestBackend(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) GetConnection(w http.ResponseWriter, r *http.Request) {
 	tenantID := chi.URLParam(r, "tenantId")
+	connectionID := chi.URLParam(r, "connectionId")
 	if err := h.ensureTenantAccess(r, tenantID); err != nil {
 		mapAuthErr(w, err)
 		return
 	}
-	if err := h.backends.TestConnection(r.Context(), tenantID); err != nil {
-		if err == service.ErrTenantNotFound {
-			writeError(w, http.StatusNotFound, "tenant not found")
+	c, err := h.connections.Get(r.Context(), tenantID, connectionID)
+	if err != nil {
+		if errors.Is(err, service.ErrConnectionNotFound) {
+			writeError(w, http.StatusNotFound, "connection not found")
 			return
 		}
-		if err == service.ErrBackendNotFound {
-			writeError(w, http.StatusBadRequest, "backend not configured")
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
+func (h *Handlers) UpdateConnection(w http.ResponseWriter, r *http.Request) {
+	tenantID := chi.URLParam(r, "tenantId")
+	connectionID := chi.URLParam(r, "connectionId")
+	if err := h.ensureTenantAdmin(r, tenantID); err != nil {
+		mapAuthErr(w, err)
+		return
+	}
+	var req struct {
+		Name *string `json:"name"`
+		URI  *string `json:"uri"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if req.Name == nil && req.URI == nil {
+		writeError(w, http.StatusBadRequest, "name or uri required")
+		return
+	}
+	if req.Name != nil {
+		if err := h.connections.Rename(r.Context(), tenantID, connectionID, *req.Name); err != nil {
+			if errors.Is(err, service.ErrConnectionNotFound) {
+				writeError(w, http.StatusNotFound, "connection not found")
+				return
+			}
+			if errors.Is(err, service.ErrDuplicateName) {
+				writeError(w, http.StatusConflict, err.Error())
+				return
+			}
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if req.URI != nil {
+		if err := h.connections.UpdateURI(r.Context(), tenantID, connectionID, *req.URI); err != nil {
+			if errors.Is(err, service.ErrConnectionNotFound) {
+				writeError(w, http.StatusNotFound, "connection not found")
+				return
+			}
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	c, err := h.connections.Get(r.Context(), tenantID, connectionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
+func (h *Handlers) DeleteConnection(w http.ResponseWriter, r *http.Request) {
+	tenantID := chi.URLParam(r, "tenantId")
+	connectionID := chi.URLParam(r, "connectionId")
+	if err := h.ensureTenantAdmin(r, tenantID); err != nil {
+		mapAuthErr(w, err)
+		return
+	}
+	if err := h.connections.Delete(r.Context(), tenantID, connectionID); err != nil {
+		if errors.Is(err, service.ErrConnectionNotFound) {
+			writeError(w, http.StatusNotFound, "connection not found")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (h *Handlers) TestConnection(w http.ResponseWriter, r *http.Request) {
+	tenantID := chi.URLParam(r, "tenantId")
+	connectionID := chi.URLParam(r, "connectionId")
+	if err := h.ensureTenantAccess(r, tenantID); err != nil {
+		mapAuthErr(w, err)
+		return
+	}
+	if err := h.connections.Test(r.Context(), tenantID, connectionID); err != nil {
+		if errors.Is(err, service.ErrConnectionNotFound) {
+			writeError(w, http.StatusNotFound, "connection not found")
 			return
 		}
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -704,10 +810,11 @@ func (h *Handlers) SavingsReport(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ===== Tokens =====
+// ===== Tokens (proxy access for a source connection) =====
 
 func (h *Handlers) IssueToken(w http.ResponseWriter, r *http.Request) {
 	tenantID := chi.URLParam(r, "tenantId")
+	connectionID := chi.URLParam(r, "connectionId")
 	if err := h.ensureTenantAdmin(r, tenantID); err != nil {
 		mapAuthErr(w, err)
 		return
@@ -716,28 +823,40 @@ func (h *Handlers) IssueToken(w http.ResponseWriter, r *http.Request) {
 		Description string `json:"description"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	raw, tok, err := h.tokens.Issue(r.Context(), tenantID, req.Description)
+	issued, err := h.tokens.Issue(r.Context(), tenantID, connectionID, req.Description)
 	if err != nil {
+		if errors.Is(err, service.ErrConnectionNotFound) {
+			writeError(w, http.StatusNotFound, "connection not found")
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	tok := issued.Token
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"tokenId":     tok.ID,
-		"rawToken":    raw,
-		"tenantId":    tok.TenantID,
-		"description": tok.Description,
-		"createdAt":   tok.CreatedAt,
+		"tokenId":            tok.ID,
+		"rawToken":           issued.RawToken,
+		"tenantId":           tok.TenantID,
+		"connectionId":       tok.ConnectionID,
+		"description":        tok.Description,
+		"createdAt":          tok.CreatedAt,
+		"proxyConnectionUri": issued.ProxyConnectionURI,
 	})
 }
 
 func (h *Handlers) ListTokens(w http.ResponseWriter, r *http.Request) {
 	tenantID := chi.URLParam(r, "tenantId")
+	connectionID := chi.URLParam(r, "connectionId")
 	if err := h.ensureTenantAccess(r, tenantID); err != nil {
 		mapAuthErr(w, err)
 		return
 	}
-	list, err := h.tokens.List(r.Context(), tenantID)
+	list, err := h.tokens.ListForConnection(r.Context(), tenantID, connectionID)
 	if err != nil {
+		if errors.Is(err, service.ErrConnectionNotFound) {
+			writeError(w, http.StatusNotFound, "connection not found")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -746,10 +865,13 @@ func (h *Handlers) ListTokens(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) RevokeToken(w http.ResponseWriter, r *http.Request) {
 	tokenID := chi.URLParam(r, "tokenId")
-	// Platform admin or any authenticated user with admin on some org may revoke;
-	// membership is enforced loosely here — prefer admin token or known token ownership later.
-	if !cpauth.IsPlatformAdmin(r.Context()) && cpauth.UserFromContext(r.Context()) == nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+	tok, err := h.tokens.Get(r.Context(), tokenID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "token not found")
+		return
+	}
+	if err := h.ensureTenantAdmin(r, tok.TenantID); err != nil {
+		mapAuthErr(w, err)
 		return
 	}
 	if err := h.tokens.Revoke(r.Context(), tokenID); err != nil {

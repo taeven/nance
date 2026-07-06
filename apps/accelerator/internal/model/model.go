@@ -76,23 +76,27 @@ type CachePolicy struct {
 	UpdatedAt         time.Time                   `json:"updatedAt"`
 }
 
-// Token represents an issued credential for the data plane (mongodb+nance://).
+// Token represents proxy access for one source connection (username=tenantId, password=raw secret).
+// Clients use the proxy connection URI returned once at issuance.
 type Token struct {
-	ID          string     `json:"id"`
-	TenantID    string     `json:"tenantId"`
-	Description string     `json:"description,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	RevokedAt   *time.Time `json:"revoked_at,omitempty"`
+	ID           string     `json:"id"`
+	TenantID     string     `json:"tenantId"`
+	ConnectionID string     `json:"connectionId,omitempty"`
+	Description  string     `json:"description,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
 }
 
-// TenantBackend holds the encrypted real MongoDB connection info (never returned over API).
-type TenantBackend struct {
-	TenantID        string     `json:"-"`
+// Connection is a named source MongoDB URI for an organization (ciphertext never JSON-exported).
+type Connection struct {
+	ID              string     `json:"id"`
+	TenantID        string     `json:"tenantId"`
+	Name            string     `json:"name"`
 	URICiphertext   []byte     `json:"-"`
 	Nonce           []byte     `json:"-"`
 	DEKVersion      string     `json:"-"`
-	LastValidatedAt *time.Time `json:"-"`
-	CreatedAt       time.Time  `json:"-"`
-	UpdatedAt       time.Time  `json:"-"`
+	LastValidatedAt *time.Time `json:"lastValidatedAt,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }

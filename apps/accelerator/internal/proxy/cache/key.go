@@ -13,24 +13,25 @@ import (
 
 // volatileTopLevel keys stripped before hashing (non-semantic for result identity).
 var volatileTopLevel = map[string]struct{}{
-	"$db":            {},
-	"$clusterTime":   {},
-	"$readPreference": {},
-	"lsid":           {},
-	"txnNumber":      {},
-	"autocommit":     {},
-	"$comment":       {},
-	"comment":        {},
-	"maxTimeMS":      {},
-	"readConcern":    {},
-	"$readConcern":   {},
-	"apiVersion":     {},
-	"apiStrict":      {},
+	"$db":                  {},
+	"$clusterTime":         {},
+	"$readPreference":      {},
+	"lsid":                 {},
+	"txnNumber":            {},
+	"autocommit":           {},
+	"$comment":             {},
+	"comment":              {},
+	"maxTimeMS":            {},
+	"readConcern":          {},
+	"$readConcern":         {},
+	"apiVersion":           {},
+	"apiStrict":            {},
 	"apiDeprecationErrors": {},
 }
 
-// CacheKey builds a deterministic Redis key for a tenant + namespace + command.
-func CacheKey(tenantID, db, coll, cmdName string, cmd bson.Raw, cacheKeyVersion int) (string, error) {
+// CacheKey builds a deterministic Redis key for a tenant + connection + namespace + command.
+// connectionID isolates caches when an org has multiple source Mongo clusters.
+func CacheKey(tenantID, connectionID, db, coll, cmdName string, cmd bson.Raw, cacheKeyVersion int) (string, error) {
 	norm, err := NormalizeCommand(cmd)
 	if err != nil {
 		return "", err
@@ -41,9 +42,12 @@ func CacheKey(tenantID, db, coll, cmdName string, cmd bson.Raw, cacheKeyVersion 
 	}
 	h := sha256.Sum256(append(append(serialized, '|'), []byte(strings.ToLower(cmdName)+"|v"+itoa(cacheKeyVersion))...))
 	digest := hex.EncodeToString(h[:])
-	key := fmt.Sprintf("nance:tenant:{%s}:ns:%s.%s:cmd:%s:v%d", tenantID, db, coll, digest, cacheKeyVersion)
+	if connectionID == "" {
+		connectionID = "_"
+	}
+	key := fmt.Sprintf("nance:tenant:{%s}:conn:%s:ns:%s.%s:cmd:%s:v%d", tenantID, connectionID, db, coll, digest, cacheKeyVersion)
 	if os.Getenv("NANCE_DEBUG_CACHE_KEYS") == "1" {
-		fmt.Fprintf(os.Stderr, "nance cache key tenant=%s ns=%s.%s cmd=%s key=%s\n", tenantID, db, coll, cmdName, key)
+		fmt.Fprintf(os.Stderr, "nance cache key tenant=%s conn=%s ns=%s.%s cmd=%s key=%s\n", tenantID, connectionID, db, coll, cmdName, key)
 	}
 	return key, nil
 }
@@ -175,8 +179,8 @@ func hasForbiddenAggStage(raw bson.Raw) bool {
 }
 
 // CacheKeyWithGeneration appends a generation segment so bumps invalidate logically.
-func CacheKeyWithGeneration(tenantID, db, coll, cmdName string, cmd bson.Raw, cacheKeyVersion int, generation int64) (string, error) {
-	base, err := CacheKey(tenantID, db, coll, cmdName, cmd, cacheKeyVersion)
+func CacheKeyWithGeneration(tenantID, connectionID, db, coll, cmdName string, cmd bson.Raw, cacheKeyVersion int, generation int64) (string, error) {
+	base, err := CacheKey(tenantID, connectionID, db, coll, cmdName, cmd, cacheKeyVersion)
 	if err != nil {
 		return "", err
 	}

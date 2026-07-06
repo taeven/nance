@@ -19,8 +19,9 @@ var (
 
 // TokenHashRow is used by the data-plane proxy to validate raw tokens via bcrypt.
 type TokenHashRow struct {
-	ID        string
-	TokenHash string
+	ID           string
+	TokenHash    string
+	ConnectionID string
 }
 
 // Store is the interface for control plane persistence.
@@ -32,20 +33,25 @@ type Store interface {
 	// DeleteTenant removes the tenant row; child tables cascade via FK.
 	DeleteTenant(ctx context.Context, id string) error
 
-	// Backends (encrypted)
-	SetBackend(ctx context.Context, tenantID string, ciphertext, nonce []byte, dekVersion string) error
-	GetBackend(ctx context.Context, tenantID string) (*model.TenantBackend, error)
-	UpdateBackendValidated(ctx context.Context, tenantID string) error
+	// Connections (encrypted source Mongo URIs; many per tenant)
+	CreateConnection(ctx context.Context, c *model.Connection) error
+	UpdateConnectionURI(ctx context.Context, connectionID string, ciphertext, nonce []byte, dekVersion string) error
+	UpdateConnectionName(ctx context.Context, connectionID, name string) error
+	GetConnection(ctx context.Context, connectionID string) (*model.Connection, error)
+	ListConnections(ctx context.Context, tenantID string) ([]*model.Connection, error)
+	DeleteConnection(ctx context.Context, connectionID string) error
+	UpdateConnectionValidated(ctx context.Context, connectionID string) error
 
 	// Policies
 	GetCachePolicy(ctx context.Context, tenantID string) (*model.CachePolicy, error)
 	UpsertCachePolicy(ctx context.Context, p *model.CachePolicy) error
 
-	// Tokens
+	// Tokens (bound to a connection)
 	CreateToken(ctx context.Context, tok *model.Token, tokenHash string) error
 	GetTokenByID(ctx context.Context, id string) (*model.Token, error)
 	ListTokensForTenant(ctx context.Context, tenantID string) ([]*model.Token, error)
-	// ListActiveTokenHashes returns id+hash for non-revoked, non-expired tokens of a tenant (proxy auth).
+	ListTokensForConnection(ctx context.Context, connectionID string) ([]*model.Token, error)
+	// ListActiveTokenHashes returns id+hash+connection for non-revoked, non-expired tokens of a tenant (proxy auth).
 	ListActiveTokenHashes(ctx context.Context, tenantID string) ([]TokenHashRow, error)
 	RevokeToken(ctx context.Context, id string) error
 
@@ -175,46 +181,112 @@ func (s *PostgresStore) DeleteTenant(ctx context.Context, id string) error {
 	return nil
 }
 
-// ===== Backends =====
+// ===== Connections =====
 
-func (s *PostgresStore) SetBackend(ctx context.Context, tenantID string, ciphertext, nonce []byte, dekVersion string) error {
+func (s *PostgresStore) CreateConnection(ctx context.Context, c *model.Connection) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO tenant_backends (tenant_id, uri_ciphertext, nonce, dek_version, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, NOW(), NOW())
-		ON CONFLICT (tenant_id) DO UPDATE SET
-			uri_ciphertext = EXCLUDED.uri_ciphertext,
-			nonce = EXCLUDED.nonce,
-			dek_version = EXCLUDED.dek_version,
-			updated_at = NOW()
-	`, tenantID, ciphertext, nonce, dekVersion)
+		INSERT INTO connections (id, tenant_id, name, uri_ciphertext, nonce, dek_version, last_validated_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`, c.ID, c.TenantID, c.Name, c.URICiphertext, c.Nonce, c.DEKVersion, c.LastValidatedAt, c.CreatedAt, c.UpdatedAt)
 	return err
 }
 
-func (s *PostgresStore) GetBackend(ctx context.Context, tenantID string) (*model.TenantBackend, error) {
-	row := s.pool.QueryRow(ctx, `
-		SELECT tenant_id, uri_ciphertext, nonce, dek_version, last_validated_at, created_at, updated_at
-		FROM tenant_backends WHERE tenant_id = $1
-	`, tenantID)
+func (s *PostgresStore) UpdateConnectionURI(ctx context.Context, connectionID string, ciphertext, nonce []byte, dekVersion string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE connections SET uri_ciphertext = $2, nonce = $3, dek_version = $4, updated_at = NOW()
+		WHERE id = $1
+	`, connectionID, ciphertext, nonce, dekVersion)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
 
-	var b model.TenantBackend
+func (s *PostgresStore) UpdateConnectionName(ctx context.Context, connectionID, name string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE connections SET name = $2, updated_at = NOW() WHERE id = $1
+	`, connectionID, name)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func scanConnection(row pgx.Row) (*model.Connection, error) {
+	var c model.Connection
 	var lastValidated sql.NullTime
-	if err := row.Scan(&b.TenantID, &b.URICiphertext, &b.Nonce, &b.DEKVersion, &lastValidated, &b.CreatedAt, &b.UpdatedAt); err != nil {
+	if err := row.Scan(&c.ID, &c.TenantID, &c.Name, &c.URICiphertext, &c.Nonce, &c.DEKVersion, &lastValidated, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
 	if lastValidated.Valid {
-		b.LastValidatedAt = &lastValidated.Time
+		c.LastValidatedAt = &lastValidated.Time
 	}
-	return &b, nil
+	return &c, nil
 }
 
-func (s *PostgresStore) UpdateBackendValidated(ctx context.Context, tenantID string) error {
-	_, err := s.pool.Exec(ctx, `
-		UPDATE tenant_backends SET last_validated_at = NOW(), updated_at = NOW() WHERE tenant_id = $1
+func (s *PostgresStore) GetConnection(ctx context.Context, connectionID string) (*model.Connection, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT id, tenant_id, name, uri_ciphertext, nonce, dek_version, last_validated_at, created_at, updated_at
+		FROM connections WHERE id = $1
+	`, connectionID)
+	return scanConnection(row)
+}
+
+func (s *PostgresStore) ListConnections(ctx context.Context, tenantID string) ([]*model.Connection, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, tenant_id, name, uri_ciphertext, nonce, dek_version, last_validated_at, created_at, updated_at
+		FROM connections WHERE tenant_id = $1 ORDER BY created_at ASC
 	`, tenantID)
-	return err
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]*model.Connection, 0)
+	for rows.Next() {
+		var c model.Connection
+		var lastValidated sql.NullTime
+		if err := rows.Scan(&c.ID, &c.TenantID, &c.Name, &c.URICiphertext, &c.Nonce, &c.DEKVersion, &lastValidated, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if lastValidated.Valid {
+			c.LastValidatedAt = &lastValidated.Time
+		}
+		out = append(out, &c)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) DeleteConnection(ctx context.Context, connectionID string) error {
+	tag, err := s.pool.Exec(ctx, `DELETE FROM connections WHERE id = $1`, connectionID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) UpdateConnectionValidated(ctx context.Context, connectionID string) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE connections SET last_validated_at = NOW(), updated_at = NOW() WHERE id = $1
+	`, connectionID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ===== Cache Policies =====
@@ -272,25 +344,26 @@ func (s *PostgresStore) UpsertCachePolicy(ctx context.Context, p *model.CachePol
 
 func (s *PostgresStore) CreateToken(ctx context.Context, tok *model.Token, tokenHash string) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO tokens (id, tenant_id, token_hash, description, created_at, expires_at, revoked_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-	`, tok.ID, tok.TenantID, tokenHash, tok.Description, tok.CreatedAt, tok.ExpiresAt, tok.RevokedAt)
+		INSERT INTO tokens (id, tenant_id, connection_id, token_hash, description, created_at, expires_at, revoked_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`, tok.ID, tok.TenantID, nullIfEmpty(tok.ConnectionID), tokenHash, tok.Description, tok.CreatedAt, tok.ExpiresAt, tok.RevokedAt)
 	return err
 }
 
-func (s *PostgresStore) GetTokenByID(ctx context.Context, id string) (*model.Token, error) {
-	row := s.pool.QueryRow(ctx, `
-		SELECT id, tenant_id, description, created_at, expires_at, revoked_at
-		FROM tokens WHERE id = $1
-	`, id)
-
+func scanToken(row interface {
+	Scan(dest ...any) error
+}) (*model.Token, error) {
 	var t model.Token
+	var connID sql.NullString
 	var expires, revoked sql.NullTime
-	if err := row.Scan(&t.ID, &t.TenantID, &t.Description, &t.CreatedAt, &expires, &revoked); err != nil {
+	if err := row.Scan(&t.ID, &t.TenantID, &connID, &t.Description, &t.CreatedAt, &expires, &revoked); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
+	}
+	if connID.Valid {
+		t.ConnectionID = connID.String
 	}
 	if expires.Valid {
 		t.ExpiresAt = &expires.Time
@@ -301,23 +374,31 @@ func (s *PostgresStore) GetTokenByID(ctx context.Context, id string) (*model.Tok
 	return &t, nil
 }
 
-func (s *PostgresStore) ListTokensForTenant(ctx context.Context, tenantID string) ([]*model.Token, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, tenant_id, description, created_at, expires_at, revoked_at
-		FROM tokens WHERE tenant_id = $1 ORDER BY created_at DESC
-	`, tenantID)
+func (s *PostgresStore) GetTokenByID(ctx context.Context, id string) (*model.Token, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT id, tenant_id, connection_id, description, created_at, expires_at, revoked_at
+		FROM tokens WHERE id = $1
+	`, id)
+	return scanToken(row)
+}
+
+func (s *PostgresStore) listTokens(ctx context.Context, query string, arg string) ([]*model.Token, error) {
+	rows, err := s.pool.Query(ctx, query, arg)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	// Non-nil empty slice so JSON encodes as [] not null.
 	out := make([]*model.Token, 0)
 	for rows.Next() {
 		var t model.Token
+		var connID sql.NullString
 		var expires, revoked sql.NullTime
-		if err := rows.Scan(&t.ID, &t.TenantID, &t.Description, &t.CreatedAt, &expires, &revoked); err != nil {
+		if err := rows.Scan(&t.ID, &t.TenantID, &connID, &t.Description, &t.CreatedAt, &expires, &revoked); err != nil {
 			return nil, err
+		}
+		if connID.Valid {
+			t.ConnectionID = connID.String
 		}
 		if expires.Valid {
 			t.ExpiresAt = &expires.Time
@@ -330,13 +411,28 @@ func (s *PostgresStore) ListTokensForTenant(ctx context.Context, tenantID string
 	return out, rows.Err()
 }
 
+func (s *PostgresStore) ListTokensForTenant(ctx context.Context, tenantID string) ([]*model.Token, error) {
+	return s.listTokens(ctx, `
+		SELECT id, tenant_id, connection_id, description, created_at, expires_at, revoked_at
+		FROM tokens WHERE tenant_id = $1 ORDER BY created_at DESC
+	`, tenantID)
+}
+
+func (s *PostgresStore) ListTokensForConnection(ctx context.Context, connectionID string) ([]*model.Token, error) {
+	return s.listTokens(ctx, `
+		SELECT id, tenant_id, connection_id, description, created_at, expires_at, revoked_at
+		FROM tokens WHERE connection_id = $1 ORDER BY created_at DESC
+	`, connectionID)
+}
+
 func (s *PostgresStore) ListActiveTokenHashes(ctx context.Context, tenantID string) ([]TokenHashRow, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, token_hash
+		SELECT id, token_hash, COALESCE(connection_id, '')
 		FROM tokens
 		WHERE tenant_id = $1
 		  AND revoked_at IS NULL
 		  AND (expires_at IS NULL OR expires_at > NOW())
+		  AND connection_id IS NOT NULL
 	`, tenantID)
 	if err != nil {
 		return nil, err
@@ -346,7 +442,7 @@ func (s *PostgresStore) ListActiveTokenHashes(ctx context.Context, tenantID stri
 	var out []TokenHashRow
 	for rows.Next() {
 		var r TokenHashRow
-		if err := rows.Scan(&r.ID, &r.TokenHash); err != nil {
+		if err := rows.Scan(&r.ID, &r.TokenHash, &r.ConnectionID); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

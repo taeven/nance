@@ -12,9 +12,9 @@ import (
 )
 
 var (
-	ErrAuthFailed      = errors.New("authentication failed")
-	ErrTenantInactive  = errors.New("tenant is not active")
-	ErrNoBackend       = errors.New("backend not configured")
+	ErrAuthFailed     = errors.New("authentication failed")
+	ErrTenantInactive = errors.New("tenant is not active")
+	ErrNoConnection   = errors.New("connection not configured for token")
 )
 
 // Validator resolves wire credentials (tenant id + raw token) against Postgres.
@@ -26,13 +26,14 @@ func NewValidator(s store.Store) *Validator {
 	return &Validator{store: s}
 }
 
-// TenantContext is attached to a connection after successful auth.
+// TenantContext is attached after successful auth. ConnectionID selects the source Mongo URI.
 type TenantContext struct {
-	TenantID string
-	TokenID  string
+	TenantID     string
+	ConnectionID string
+	TokenID      string
 }
 
-// Authenticate checks username (tenant id) + password (raw API token).
+// Authenticate checks username (tenant id) + password (raw API token bound to one connection).
 func (v *Validator) Authenticate(ctx context.Context, username, password string) (*TenantContext, error) {
 	username = strings.TrimSpace(username)
 	if username == "" || password == "" {
@@ -50,21 +51,27 @@ func (v *Validator) Authenticate(ctx context.Context, username, password string)
 		return nil, ErrTenantInactive
 	}
 
-	// Ensure backend exists (fail fast; pool will also check).
-	if _, err := v.store.GetBackend(ctx, username); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, ErrNoBackend
-		}
-		return nil, err
-	}
-
 	rows, err := v.store.ListActiveTokenHashes(ctx, username)
 	if err != nil {
 		return nil, err
 	}
 	for _, row := range rows {
 		if bcrypt.CompareHashAndPassword([]byte(row.TokenHash), []byte(password)) == nil {
-			return &TenantContext{TenantID: username, TokenID: row.ID}, nil
+			if row.ConnectionID == "" {
+				return nil, ErrNoConnection
+			}
+			// Ensure the connection still exists.
+			if _, err := v.store.GetConnection(ctx, row.ConnectionID); err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					return nil, ErrNoConnection
+				}
+				return nil, err
+			}
+			return &TenantContext{
+				TenantID:     username,
+				ConnectionID: row.ConnectionID,
+				TokenID:      row.ID,
+			}, nil
 		}
 	}
 	return nil, ErrAuthFailed

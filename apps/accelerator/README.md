@@ -82,7 +82,7 @@ Migrations under `migrations/` apply on startup (simple file runner).
 make seed
 ```
 
-Uses admin bearer (`NANCE_ADMIN_TOKEN` or `dev` in the Makefile). Copy `rawToken` — shown only once.
+Uses admin bearer (`NANCE_ADMIN_TOKEN` or `dev` in the Makefile). Seed sets the demo backend, then issues proxy access. Copy `proxyConnectionUri` (or `rawToken`) — shown only once. Access requires a configured connection.
 
 ### 4. Proxy (`:27018`, health `:9090`)
 
@@ -99,11 +99,13 @@ Compose Mongo owns `:27017`; proxy defaults to **`:27018`**. Override with `NANC
 
 ### 5. Connect through the proxy
 
-**PLAIN only** (no SCRAM yet). Username = tenant id, password = raw token:
+**PLAIN only** (no SCRAM yet). Prefer the **`proxyConnectionUri`** returned when creating access for a connection. Equivalent manual form (username = tenant id, password = raw token):
 
 ```text
-mongodb://demo:<rawToken>@127.0.0.1:27018/mydb?authMechanism=PLAIN&authSource=$external
+mongodb://demo:<rawToken>@127.0.0.1:27018/?authMechanism=PLAIN&authSource=$external
 ```
+
+Set `NANCE_PROXY_PUBLIC_ENDPOINT` on the control plane so issued URIs use your real proxy host (default `127.0.0.1:27018`).
 
 ## Important environment variables
 
@@ -116,6 +118,7 @@ mongodb://demo:<rawToken>@127.0.0.1:27018/mydb?authMechanism=PLAIN&authSource=$e
 | `NANCE_ADMIN_TOKEN` | (empty = open / legacy dev mode unless restricted) | Platform admin bearer |
 | `NANCE_INVITE_ONLY` | `false` | Users cannot create orgs; join via invite only |
 | `NANCE_REQUIRE_USER_AUTH` | unset | If `1`, require session/admin token even when admin token is empty |
+| `NANCE_PROXY_PUBLIC_ENDPOINT` | `127.0.0.1:27018` | Host[:port] embedded in issued `proxyConnectionUri` values and `GET /platform` |
 | `PORT` | `8080` | HTTP listen (host uses `PORT`; bind is `:`+port) |
 | `MIGRATIONS_DIR` | `./migrations` | SQL migrations |
 | `NANCE_REDIS_ADDR` | | Optional Redis for explicit invalidation from API |
@@ -147,7 +150,7 @@ Base path: **`/api/v1`**. Health: `/healthz`, `/readyz`, `/metrics`.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/platform` | `{ inviteOnly, allowOrgCreation, allowAdminBootstrap }` |
+| `GET` | `/platform` | `{ inviteOnly, allowOrgCreation, allowAdminBootstrap, proxyPublicEndpoint }` |
 | `POST` | `/auth/request-code` | `{ "email" }` — send OTP (dev: log mailer) |
 | `POST` | `/auth/verify` | `{ "email", "code" }` → `{ token, user }` |
 
@@ -168,15 +171,16 @@ Base path: **`/api/v1`**. Health: `/healthz`, `/readyz`, `/metrics`.
 | `POST` / `GET` | `/tenants/{id}/invites` | Invite / list pending (admin+) |
 | `DELETE` | `/tenants/{id}/invites/{inviteId}` | Revoke invite |
 | `DELETE` | `/tenants/{id}/members/{userId}` | Remove member |
-| `POST` | `/tenants/{id}/backend` | `{ "uri" }` encrypted backend |
-| `POST` | `/tenants/{id}/backend/test` | Connectivity test |
-| `GET` | `/tenants/{id}/policy` | Cache policy |
+| `GET` / `POST` | `/tenants/{id}/connections` | List / create named source connections (`{ name, uri }`) |
+| `GET` / `PUT` / `DELETE` | `/tenants/{id}/connections/{connectionId}` | Get / update (`name` and/or `uri`) / delete |
+| `POST` | `/tenants/{id}/connections/{connectionId}/test` | Connectivity test |
+| `GET` / `POST` | `/tenants/{id}/connections/{connectionId}/tokens` | List / create proxy access (returns `proxyConnectionUri` once) |
+| `DELETE` | `/tokens/{tokenId}` | Revoke proxy access |
+| `GET` | `/tenants/{id}/policy` | Cache policy (org-wide) |
 | `PUT` | `/tenants/{id}/policy/defaults` | `{ "defaultTtlSeconds" }` |
 | `PUT` | `/tenants/{id}/policy/collections/{db.coll}` | Per-collection TTL override |
-| `POST` | `/tenants/{id}/invalidate` | Flush cache namespace/tags |
+| `POST` | `/tenants/{id}/invalidate` | Flush cache namespace/tags (all connections in org) |
 | `GET` | `/tenants/{id}/savings` | Metrics hints |
-| `POST` / `GET` | `/tenants/{id}/tokens` | Issue / list proxy tokens |
-| `DELETE` | `/tokens/{tokenId}` | Revoke token |
 
 **Membership:** members = read; admins/owners = writes; only owners delete org (with email code). Platform admin token bypasses membership for ops/bootstrap.
 
@@ -197,7 +201,7 @@ make lint   # if configured
 ## Security notes
 
 - Real Mongo URIs are **never** stored in plaintext; encrypted with `NANCE_MASTER_KEY`.
-- Data-plane tokens: bcrypt hash in DB; **raw token returned once** at issuance.
+- Proxy access: bcrypt hash in DB; **raw token + `proxyConnectionUri` returned once** at issuance (requires configured connection).
 - Email OTP sessions are SHA-256 hashed in `user_sessions`.
 - Prefer invite-only + admin token on shared networks; terminate TLS at ingress.
 

@@ -13,7 +13,7 @@ import (
 
 func NewServer(
 	ts *service.TenantService,
-	bs *service.BackendService,
+	cs *service.ConnectionService,
 	ps *service.PolicyService,
 	toks *service.TokenService,
 	authSvc *service.AuthService,
@@ -26,7 +26,7 @@ func NewServer(
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 
-	h := handlers.NewHandlers(ts, bs, ps, toks, authSvc, orgSvc, platform)
+	h := handlers.NewHandlers(ts, cs, ps, toks, authSvc, orgSvc, platform)
 
 	// Probe endpoints without access logs (k8s/LB scrapes).
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -75,9 +75,17 @@ func NewServer(
 				r.Delete("/tenants/{tenantId}/invites/{inviteId}", h.RevokeInvite)
 				r.Delete("/tenants/{tenantId}/members/{userId}", h.RemoveMember)
 
-				// Backends (admin+ write; test is read-ok for members)
-				r.Post("/tenants/{tenantId}/backend", h.SetBackend)
-				r.Post("/tenants/{tenantId}/backend/test", h.TestBackend)
+				// Connections (many named source Mongo URIs per org)
+				r.Get("/tenants/{tenantId}/connections", h.ListConnections)
+				r.Post("/tenants/{tenantId}/connections", h.CreateConnection)
+				r.Get("/tenants/{tenantId}/connections/{connectionId}", h.GetConnection)
+				r.Put("/tenants/{tenantId}/connections/{connectionId}", h.UpdateConnection)
+				r.Delete("/tenants/{tenantId}/connections/{connectionId}", h.DeleteConnection)
+				r.Post("/tenants/{tenantId}/connections/{connectionId}/test", h.TestConnection)
+				// Proxy access tokens per connection
+				r.Get("/tenants/{tenantId}/connections/{connectionId}/tokens", h.ListTokens)
+				r.Post("/tenants/{tenantId}/connections/{connectionId}/tokens", h.IssueToken)
+				r.Delete("/tokens/{tokenId}", h.RevokeToken)
 
 				// Policies (GET member; PUT admin+)
 				r.Get("/tenants/{tenantId}/policy", h.GetPolicy)
@@ -86,11 +94,6 @@ func NewServer(
 
 				r.Post("/tenants/{tenantId}/invalidate", h.Invalidate) // admin+
 				r.Get("/tenants/{tenantId}/savings", h.SavingsReport)
-
-				// Tokens (list member; issue/revoke admin+)
-				r.Post("/tenants/{tenantId}/tokens", h.IssueToken)
-				r.Get("/tenants/{tenantId}/tokens", h.ListTokens)
-				r.Delete("/tokens/{tokenId}", h.RevokeToken)
 			})
 		})
 	})

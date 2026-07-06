@@ -115,12 +115,15 @@ func (m *Manager) Stop() {
 	}
 }
 
-// Get returns a pooled backend client for the tenant and increments the in-use refcount.
-// Caller MUST call Release(tenantID) when the request no longer needs the client
+// Get returns a pooled backend client for a source connection and increments the in-use refcount.
+// Caller MUST call Release(connectionID) when the request no longer needs the client
 // (typically defer right after a successful Get).
-func (m *Manager) Get(ctx context.Context, tenantID string) (*mongo.Client, error) {
+func (m *Manager) Get(ctx context.Context, connectionID string) (*mongo.Client, error) {
+	if connectionID == "" {
+		return nil, fmt.Errorf("connection id required")
+	}
 	m.mu.Lock()
-	if e, ok := m.clients[tenantID]; ok && e != nil && e.client != nil {
+	if e, ok := m.clients[connectionID]; ok && e != nil && e.client != nil {
 		e.refs++
 		e.lastUsed = time.Now()
 		c := e.client
@@ -129,9 +132,9 @@ func (m *Manager) Get(ctx context.Context, tenantID string) (*mongo.Client, erro
 	}
 	m.mu.Unlock()
 
-	v, err, _ := m.sf.Do(tenantID, func() (any, error) {
+	v, err, _ := m.sf.Do(connectionID, func() (any, error) {
 		m.mu.Lock()
-		if e, ok := m.clients[tenantID]; ok && e != nil && e.client != nil {
+		if e, ok := m.clients[connectionID]; ok && e != nil && e.client != nil {
 			e.refs++
 			e.lastUsed = time.Now()
 			c := e.client
@@ -140,13 +143,13 @@ func (m *Manager) Get(ctx context.Context, tenantID string) (*mongo.Client, erro
 		}
 		m.mu.Unlock()
 
-		client, err := m.connect(ctx, tenantID)
+		client, err := m.connect(ctx, connectionID)
 		if err != nil {
 			return nil, err
 		}
 
 		m.mu.Lock()
-		if existing, ok := m.clients[tenantID]; ok && existing != nil && existing.client != nil {
+		if existing, ok := m.clients[connectionID]; ok && existing != nil && existing.client != nil {
 			// Lost race: another creator finished; drop ours and use existing.
 			existing.refs++
 			existing.lastUsed = time.Now()
@@ -155,13 +158,13 @@ func (m *Manager) Get(ctx context.Context, tenantID string) (*mongo.Client, erro
 			_ = client.Disconnect(context.Background())
 			return c, nil
 		}
-		m.clients[tenantID] = &tenantClient{
+		m.clients[connectionID] = &tenantClient{
 			client:   client,
 			lastUsed: time.Now(),
 			refs:     1,
 		}
 		m.mu.Unlock()
-		m.log.Info("backend client created", "tenant", tenantID)
+		m.log.Info("backend client created", "connection", connectionID)
 		return client, nil
 	})
 	if err != nil {
@@ -170,15 +173,15 @@ func (m *Manager) Get(ctx context.Context, tenantID string) (*mongo.Client, erro
 	return v.(*mongo.Client), nil
 }
 
-// Release decrements the in-use refcount for a tenant client obtained via Get.
-// Safe to call with unknown tenant (no-op). Idle eviction only runs when refs == 0.
-func (m *Manager) Release(tenantID string) {
-	if tenantID == "" {
+// Release decrements the in-use refcount for a connection client obtained via Get.
+// Safe to call with unknown id (no-op). Idle eviction only runs when refs == 0.
+func (m *Manager) Release(connectionID string) {
+	if connectionID == "" {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	e, ok := m.clients[tenantID]
+	e, ok := m.clients[connectionID]
 	if !ok || e == nil {
 		return
 	}
@@ -188,15 +191,16 @@ func (m *Manager) Release(tenantID string) {
 	e.lastUsed = time.Now()
 }
 
-func (m *Manager) connect(ctx context.Context, tenantID string) (*mongo.Client, error) {
-	be, err := m.store.GetBackend(ctx, tenantID)
+func (m *Manager) connect(ctx context.Context, connectionID string) (*mongo.Client, error) {
+	conn, err := m.store.GetConnection(ctx, connectionID)
 	if err != nil {
-		return nil, fmt.Errorf("backend lookup: %w", err)
+		return nil, fmt.Errorf("connection lookup: %w", err)
 	}
 
-	plaintext, err := m.crypto.Decrypt(be.URICiphertext, be.Nonce, tenantID)
+	// AAD is tenant_id (same as control-plane encryption).
+	plaintext, err := m.crypto.Decrypt(conn.URICiphertext, conn.Nonce, conn.TenantID)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt backend uri: %w", err)
+		return nil, fmt.Errorf("decrypt connection uri: %w", err)
 	}
 	uri := string(plaintext)
 

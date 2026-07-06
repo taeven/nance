@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/taeven/nance/accelerator/internal/controlplane/store"
@@ -56,23 +57,71 @@ func TestPolicyService_DefaultsAndCollection(t *testing.T) {
 	}
 }
 
-func TestTokenService_IssueListRevoke(t *testing.T) {
+func TestConnectionAndTokenService(t *testing.T) {
 	ms := store.NewMemoryStore()
-	svc := NewTokenService(ms)
 	ctx := context.Background()
-	raw, tok, err := svc.Issue(ctx, "t1", "ci")
-	if err != nil || raw == "" || tok.ID == "" {
+	_, _ = NewTenantService(ms).Create(ctx, "t1", "Tenant")
+
+	// Minimal crypto: use empty Config will fail encrypt — seed connection via store directly.
+	now := ctx
+	_ = now
+	c := &model.Connection{
+		ID: "conn_a", TenantID: "t1", Name: "prod",
+		URICiphertext: []byte("ct"), Nonce: []byte("n"), DEKVersion: "v1",
+	}
+	if err := ms.CreateConnection(ctx, c); err != nil {
 		t.Fatal(err)
 	}
-	list, err := svc.List(ctx, "t1")
-	if err != nil || len(list) != 1 {
+	c2 := &model.Connection{
+		ID: "conn_b", TenantID: "t1", Name: "staging",
+		URICiphertext: []byte("ct2"), Nonce: []byte("n2"), DEKVersion: "v1",
+	}
+	if err := ms.CreateConnection(ctx, c2); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.Revoke(ctx, tok.ID); err != nil {
+	list, err := ms.ListConnections(ctx, "t1")
+	if err != nil || len(list) != 2 {
+		t.Fatalf("%d %v", len(list), err)
+	}
+
+	svc := NewTokenService(ms).WithProxyPublicEndpoint("proxy.example.com:27018")
+	if _, err := svc.Issue(ctx, "t1", "missing", "x"); err != ErrConnectionNotFound {
+		t.Fatalf("want not found, got %v", err)
+	}
+	issued, err := svc.Issue(ctx, "t1", "conn_a", "ci")
+	if err != nil || issued.RawToken == "" || issued.Token.ConnectionID != "conn_a" {
+		t.Fatal(err, issued)
+	}
+	if !strings.Contains(issued.ProxyConnectionURI, "proxy.example.com:27018") {
+		t.Fatalf("uri: %s", issued.ProxyConnectionURI)
+	}
+	issuedB, err := svc.Issue(ctx, "t1", "conn_b", "other")
+	if err != nil || issuedB.Token.ConnectionID != "conn_b" {
 		t.Fatal(err)
 	}
-	got, _ := ms.GetTokenByID(ctx, tok.ID)
+	listA, err := svc.ListForConnection(ctx, "t1", "conn_a")
+	if err != nil || len(listA) != 1 {
+		t.Fatalf("%d %v", len(listA), err)
+	}
+	if err := svc.Revoke(ctx, issued.Token.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := ms.GetTokenByID(ctx, issued.Token.ID)
 	if got.RevokedAt == nil {
 		t.Fatal("expected revoked")
+	}
+}
+
+func TestBuildProxyConnectionURI(t *testing.T) {
+	uri := BuildProxyConnectionURI("127.0.0.1:27018", "demo", "secret+token")
+	if !strings.HasPrefix(uri, "mongodb://") {
+		t.Fatalf("scheme: %s", uri)
+	}
+	if !strings.Contains(uri, "authSource") {
+		t.Fatalf("missing authSource: %s", uri)
+	}
+	uri2 := BuildProxyConnectionURI("", "org", "tok")
+	if !strings.Contains(uri2, "127.0.0.1:27018") {
+		t.Fatalf("default host: %s", uri2)
 	}
 }

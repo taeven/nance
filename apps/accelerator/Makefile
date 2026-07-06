@@ -28,7 +28,7 @@ dev-up:
 dev-down:
 	docker compose down -v
 
-# Seed a demo tenant + backend + policy + token
+# Seed a demo tenant + connection + policy + proxy access token
 # Requires the control plane to be running on :8080 and NANCE_ADMIN_TOKEN (or none in dev)
 seed:
 	@echo "Creating demo tenant..."
@@ -37,32 +37,30 @@ seed:
 		-H "Authorization: Bearer $${NANCE_ADMIN_TOKEN:-dev}" \
 		-d '{"id":"demo","name":"Demo Tenant"}' | cat
 
-	@echo "\nSetting backend (pointing at the compose mongo)..."
-	curl -s -X POST http://localhost:8080/api/v1/tenants/demo/backend \
+	@echo "\nCreating default connection (pointing at the compose mongo)..."
+	@CONN_JSON=$$(curl -s -X POST http://localhost:8080/api/v1/tenants/demo/connections \
 		-H "Content-Type: application/json" \
 		-H "Authorization: Bearer $${NANCE_ADMIN_TOKEN:-dev}" \
-		-d '{"uri":"mongodb://root:example@localhost:27017/?authSource=admin"}' | cat
-
-	@echo "\nTesting the backend connection..."
-	curl -s -X POST http://localhost:8080/api/v1/tenants/demo/backend/test \
-		-H "Authorization: Bearer $${NANCE_ADMIN_TOKEN:-dev}" | cat
-
-	@echo "\nSetting a sample cache policy..."
+		-d '{"name":"default","uri":"mongodb://root:example@localhost:27017/?authSource=admin"}'); \
+	echo "$$CONN_JSON" | cat; \
+	CONN_ID=$$(echo "$$CONN_JSON" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p'); \
+	if [ -z "$$CONN_ID" ]; then echo "Failed to create connection"; exit 1; fi; \
+	echo "\nTesting connection $$CONN_ID..."; \
+	curl -s -X POST "http://localhost:8080/api/v1/tenants/demo/connections/$$CONN_ID/test" \
+		-H "Authorization: Bearer $${NANCE_ADMIN_TOKEN:-dev}" | cat; \
+	echo "\nSetting a sample cache policy..."; \
 	curl -s -X PUT http://localhost:8080/api/v1/tenants/demo/policy/collections/mydb.users \
 		-H "Content-Type: application/json" \
 		-H "Authorization: Bearer $${NANCE_ADMIN_TOKEN:-dev}" \
-		-d '{"enabled":true,"ttlSeconds":300,"maxResultBytes":1048576}' | cat
-
-	@echo "\nIssuing a data-plane token (copy the rawToken!):"
-	curl -s -X POST http://localhost:8080/api/v1/tenants/demo/tokens \
+		-d '{"enabled":true,"ttlSeconds":300,"maxResultBytes":1048576}' | cat; \
+	echo "\nIssuing proxy access (copy proxyConnectionUri / rawToken!):"; \
+	curl -s -X POST "http://localhost:8080/api/v1/tenants/demo/connections/$$CONN_ID/tokens" \
 		-H "Content-Type: application/json" \
 		-H "Authorization: Bearer $${NANCE_ADMIN_TOKEN:-dev}" \
 		-d '{"description":"local dev token"}' | cat
 
-	@echo "\n\nDone. Connect through the proxy (default :27018) with PLAIN auth:"
-	@echo '  mongodb://demo:<rawToken>@127.0.0.1:27018/mydb?authMechanism=PLAIN&authSource=$$external'
-	@echo "Or with the nance scheme (drivers treat it like mongodb:// if you rewrite the scheme):"
-	@echo '  mongodb+nance://demo:<rawToken>@127.0.0.1:27018/mydb?authMechanism=PLAIN&authSource=$$external'
+	@echo "\n\nDone. Prefer the proxyConnectionUri from issue response, or PLAIN auth:"
+	@echo '  mongodb://demo:<rawToken>@127.0.0.1:27018/?authMechanism=PLAIN&authSource=$$external'
 
 test:
 	go test ./...

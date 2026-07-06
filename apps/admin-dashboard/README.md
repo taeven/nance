@@ -2,7 +2,7 @@
 
 Nuxt 3 admin UI for the [Nance accelerator control plane](../accelerator/README.md).
 
-Operators and team members sign in with **email + one-time code**, manage **organizations** (tenants), **members/invites**, MongoDB **backends**, **cache TTL**, **proxy tokens**, and **invalidation**. Part of the [Nance monorepo](../../README.md).
+Operators and team members sign in with **email + one-time code**, manage **organizations** (tenants), **members/invites**, **connections** (source Mongo + proxy access URIs), **cache TTL**, and **invalidation**. Part of the [Nance monorepo](../../README.md).
 
 ## Features
 
@@ -12,12 +12,11 @@ Operators and team members sign in with **email + one-time code**, manage **orga
 | **Organizations** | List memberships, create (unless invite-only), accept invites |
 | **Roles** | **member** read-only · **admin** manage settings · **owner** + delete org |
 | **Members** | Invite by email (role limits by inviter), revoke invites, remove members |
-| **Connection** | Set encrypted backend URI; test connectivity |
+| **Connections** | Multiple named source Mongo URIs per org; test; **create proxy access** per connection (URI shown once); list/revoke credentials |
 | **Caching** | Default **60s** TTL for all `*_cache` queries; optional per-collection overrides |
-| **Tokens** | Issue (raw secret once), list, revoke (admin+) |
 | **Invalidate** | Explicit cache flush by real db/collection/tags (admin+) |
 | **Danger zone** | Owners only: delete org with email verification code |
-| **Platform** | Respects `GET /api/v1/platform` (`inviteOnly` / `allowOrgCreation`) |
+| **Platform** | Respects `GET /api/v1/platform` (`inviteOnly` / `allowOrgCreation` / `proxyPublicEndpoint`) |
 
 ### How caching works
 
@@ -87,7 +86,7 @@ Session token is stored in **localStorage** (`nance_session_token`) after verify
 | `/login` | Email + OTP |
 | `/onboarding` | Display name (required once) |
 | `/` | Organizations + pending invites |
-| `/tenants/:id` | Org detail: connection, caching, tokens, members, invalidate, danger zone |
+| `/tenants/:id` | Org detail: connection (source + proxy access), caching, members, invalidate, danger zone |
 
 ## Scripts
 
@@ -102,16 +101,16 @@ npm run preview  # preview production build
 1. Start accelerator infra + control plane (+ proxy if testing data plane).  
 2. `npm run dev` in this app; sign in.  
 3. Create an organization (or accept invite).  
-4. **Connection**: set Mongo URI; test.  
-5. **Caching**: confirm default TTL (60s) or set overrides.  
-6. **Tokens**: issue proxy token; use PLAIN URI against the proxy.  
+4. **Connection**: add one or more named source Mongo URIs; test; **Create access** on a connection and copy the **proxy connection URI**.  
+5. **Caching**: confirm default TTL (60s) or set overrides (org-wide).  
+6. Point apps at the proxy using the issued URI (`authMechanism=PLAIN`); token selects which source connection is used.  
 7. **Members**: invite teammates; they log in with the invited email.  
 8. **Owner**: Danger zone → acknowledge data loss → email code → confirm delete.
 
 ## Security notes
 
-- Backend URIs are write-only from the UI; never returned by the API.  
-- Proxy tokens appear **once** — copy immediately.  
+- Source Mongo URIs are write-only from the UI; never returned by the API.  
+- Proxy connection URIs (and raw secrets) appear **once** at create — copy immediately.  
 - Prefer user sessions over a long-lived admin token in production.  
 - Run the dashboard only on trusted networks or behind auth/TLS at the edge.
 
