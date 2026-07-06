@@ -56,18 +56,18 @@ func (c *Coordinator) GetOrLoad(ctx context.Context, key string, load func(ctx c
 }
 
 // BestEffortSet stores value and registers key; never returns blocking errors to caller.
-func (c *Coordinator) BestEffortSet(ctx context.Context, tenantID, db, coll, key string, value []byte, ttl time.Duration) {
+func (c *Coordinator) BestEffortSet(ctx context.Context, tenantID, connectionID, db, coll, key string, value []byte, ttl time.Duration) {
 	if c == nil || c.Store == nil || len(value) == 0 {
 		return
 	}
 	_ = c.Store.Set(ctx, key, value, ttl)
-	_ = c.Store.RegisterKey(ctx, tenantID, db, coll, key)
+	_ = c.Store.RegisterKey(ctx, tenantID, connectionID, db, coll, key)
 }
 
-// BestEffortInvalidate runs namespace invalidation asynchronously-friendly (caller may use go).
-func (c *Coordinator) BestEffortInvalidate(ctx context.Context, tenantID, db, coll string) error {
+// BestEffortInvalidate runs connection-scoped namespace invalidation (fail-open for callers).
+func (c *Coordinator) BestEffortInvalidate(ctx context.Context, tenantID, connectionID, db, coll string) error {
 	if c == nil || c.Store == nil {
 		return nil
 	}
-	return c.Store.InvalidateNamespace(ctx, tenantID, db, coll)
+	return c.Store.InvalidateNamespace(ctx, tenantID, connectionID, db, coll)
 }

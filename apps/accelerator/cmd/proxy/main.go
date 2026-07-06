@@ -94,6 +94,7 @@ func main() {
 		CacheStats:    cacheStats,
 		CachedCursors: cachedCursors,
 		Limiter:       limiter,
+		Store:         pgStore,
 	})
 
 	// HTTP health/metrics sidecar

@@ -37,6 +37,7 @@ type Store interface {
 	CreateConnection(ctx context.Context, c *model.Connection) error
 	UpdateConnectionURI(ctx context.Context, connectionID string, ciphertext, nonce []byte, dekVersion string) error
 	UpdateConnectionName(ctx context.Context, connectionID, name string) error
+	UpdateConnectionAutoInvalidate(ctx context.Context, connectionID string, enabled bool) error
 	GetConnection(ctx context.Context, connectionID string) (*model.Connection, error)
 	ListConnections(ctx context.Context, tenantID string) ([]*model.Connection, error)
 	DeleteConnection(ctx context.Context, connectionID string) error
@@ -185,9 +186,9 @@ func (s *PostgresStore) DeleteTenant(ctx context.Context, id string) error {
 
 func (s *PostgresStore) CreateConnection(ctx context.Context, c *model.Connection) error {
 	_, err := s.pool.Exec(ctx, `
-		INSERT INTO connections (id, tenant_id, name, uri_ciphertext, nonce, dek_version, last_validated_at, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-	`, c.ID, c.TenantID, c.Name, c.URICiphertext, c.Nonce, c.DEKVersion, c.LastValidatedAt, c.CreatedAt, c.UpdatedAt)
+		INSERT INTO connections (id, tenant_id, name, uri_ciphertext, nonce, dek_version, auto_invalidate_on_write, last_validated_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	`, c.ID, c.TenantID, c.Name, c.URICiphertext, c.Nonce, c.DEKVersion, c.AutoInvalidateOnWrite, c.LastValidatedAt, c.CreatedAt, c.UpdatedAt)
 	return err
 }
 
@@ -218,10 +219,23 @@ func (s *PostgresStore) UpdateConnectionName(ctx context.Context, connectionID, 
 	return nil
 }
 
+func (s *PostgresStore) UpdateConnectionAutoInvalidate(ctx context.Context, connectionID string, enabled bool) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE connections SET auto_invalidate_on_write = $2, updated_at = NOW() WHERE id = $1
+	`, connectionID, enabled)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func scanConnection(row pgx.Row) (*model.Connection, error) {
 	var c model.Connection
 	var lastValidated sql.NullTime
-	if err := row.Scan(&c.ID, &c.TenantID, &c.Name, &c.URICiphertext, &c.Nonce, &c.DEKVersion, &lastValidated, &c.CreatedAt, &c.UpdatedAt); err != nil {
+	if err := row.Scan(&c.ID, &c.TenantID, &c.Name, &c.URICiphertext, &c.Nonce, &c.DEKVersion, &c.AutoInvalidateOnWrite, &lastValidated, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -233,9 +247,11 @@ func scanConnection(row pgx.Row) (*model.Connection, error) {
 	return &c, nil
 }
 
+const connectionSelectCols = `id, tenant_id, name, uri_ciphertext, nonce, dek_version, auto_invalidate_on_write, last_validated_at, created_at, updated_at`
+
 func (s *PostgresStore) GetConnection(ctx context.Context, connectionID string) (*model.Connection, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, tenant_id, name, uri_ciphertext, nonce, dek_version, last_validated_at, created_at, updated_at
+		SELECT `+connectionSelectCols+`
 		FROM connections WHERE id = $1
 	`, connectionID)
 	return scanConnection(row)
@@ -243,7 +259,7 @@ func (s *PostgresStore) GetConnection(ctx context.Context, connectionID string) 
 
 func (s *PostgresStore) ListConnections(ctx context.Context, tenantID string) ([]*model.Connection, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, tenant_id, name, uri_ciphertext, nonce, dek_version, last_validated_at, created_at, updated_at
+		SELECT `+connectionSelectCols+`
 		FROM connections WHERE tenant_id = $1 ORDER BY created_at ASC
 	`, tenantID)
 	if err != nil {
@@ -254,7 +270,7 @@ func (s *PostgresStore) ListConnections(ctx context.Context, tenantID string) ([
 	for rows.Next() {
 		var c model.Connection
 		var lastValidated sql.NullTime
-		if err := rows.Scan(&c.ID, &c.TenantID, &c.Name, &c.URICiphertext, &c.Nonce, &c.DEKVersion, &lastValidated, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.TenantID, &c.Name, &c.URICiphertext, &c.Nonce, &c.DEKVersion, &c.AutoInvalidateOnWrite, &lastValidated, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if lastValidated.Valid {

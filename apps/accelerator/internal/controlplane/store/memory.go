@@ -176,6 +176,18 @@ func (m *MemoryStore) UpdateConnectionName(_ context.Context, connectionID, name
 	return nil
 }
 
+func (m *MemoryStore) UpdateConnectionAutoInvalidate(_ context.Context, connectionID string, enabled bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.connections[connectionID]
+	if !ok {
+		return ErrNotFound
+	}
+	c.AutoInvalidateOnWrite = enabled
+	c.UpdatedAt = time.Now().UTC()
+	return nil
+}
+
 func (m *MemoryStore) GetConnection(_ context.Context, connectionID string) (*model.Connection, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

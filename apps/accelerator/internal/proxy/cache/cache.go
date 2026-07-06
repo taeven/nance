@@ -19,9 +19,9 @@ var ErrUnavailable = errors.New("cache unavailable")
 type Store interface {
 	Get(ctx context.Context, key string) ([]byte, error)
 	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
-	// RegisterKey adds key to the namespace registry set (for invalidation).
-	RegisterKey(ctx context.Context, tenantID, db, coll, key string) error
-	InvalidateNamespace(ctx context.Context, tenantID, db, coll string) error
+	// RegisterKey adds key to the connection-scoped namespace registry (for invalidation).
+	RegisterKey(ctx context.Context, tenantID, connectionID, db, coll, key string) error
+	InvalidateNamespace(ctx context.Context, tenantID, connectionID, db, coll string) error
 	Ping(ctx context.Context) error
 	Close() error
 }
@@ -35,9 +35,9 @@ type RedisStore struct {
 
 // Options configures the Redis client.
 type Options struct {
-	Addr     string // host:port or comma-separated for cluster
-	Password string
-	DB       int
+	Addr       string // host:port or comma-separated for cluster
+	Password   string
+	DB         int
 	GetTimeout time.Duration
 	SetTimeout time.Duration
 }
@@ -88,22 +88,25 @@ func (s *RedisStore) Set(ctx context.Context, key string, value []byte, ttl time
 	return nil
 }
 
-func registryKey(tenantID, db, coll string) string {
+func registryKey(tenantID, connectionID, db, coll string) string {
 	// Hash tag keeps tenant keys on same cluster slot.
-	return fmt.Sprintf("nance:tenant:{%s}:ns:%s.%s:known_keys", tenantID, db, coll)
+	if connectionID == "" {
+		connectionID = "_"
+	}
+	return fmt.Sprintf("nance:tenant:{%s}:conn:%s:ns:%s.%s:known_keys", tenantID, connectionID, db, coll)
 }
 
-func (s *RedisStore) RegisterKey(ctx context.Context, tenantID, db, coll, key string) error {
+func (s *RedisStore) RegisterKey(ctx context.Context, tenantID, connectionID, db, coll, key string) error {
 	cctx, cancel := context.WithTimeout(ctx, s.setTO)
 	defer cancel()
-	rk := registryKey(tenantID, db, coll)
+	rk := registryKey(tenantID, connectionID, db, coll)
 	return s.client.SAdd(cctx, rk, key).Err()
 }
 
-func (s *RedisStore) InvalidateNamespace(ctx context.Context, tenantID, db, coll string) error {
+func (s *RedisStore) InvalidateNamespace(ctx context.Context, tenantID, connectionID, db, coll string) error {
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	rk := registryKey(tenantID, db, coll)
+	rk := registryKey(tenantID, connectionID, db, coll)
 	members, err := s.client.SMembers(cctx, rk).Result()
 	if err != nil && err != redis.Nil {
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
@@ -174,8 +177,8 @@ func (m *MemoryStore) Set(_ context.Context, key string, value []byte, ttl time.
 	return nil
 }
 
-func (m *MemoryStore) RegisterKey(_ context.Context, tenantID, db, coll, key string) error {
-	rk := registryKey(tenantID, db, coll)
+func (m *MemoryStore) RegisterKey(_ context.Context, tenantID, connectionID, db, coll, key string) error {
+	rk := registryKey(tenantID, connectionID, db, coll)
 	if m.sets[rk] == nil {
 		m.sets[rk] = make(map[string]struct{})
 	}
@@ -183,8 +186,8 @@ func (m *MemoryStore) RegisterKey(_ context.Context, tenantID, db, coll, key str
 	return nil
 }
 
-func (m *MemoryStore) InvalidateNamespace(_ context.Context, tenantID, db, coll string) error {
-	rk := registryKey(tenantID, db, coll)
+func (m *MemoryStore) InvalidateNamespace(_ context.Context, tenantID, connectionID, db, coll string) error {
+	rk := registryKey(tenantID, connectionID, db, coll)
 	for k := range m.sets[rk] {
 		delete(m.mu, k)
 	}
@@ -202,10 +205,10 @@ func (NoopStore) Get(context.Context, string) ([]byte, error) { return nil, ErrU
 func (NoopStore) Set(context.Context, string, []byte, time.Duration) error {
 	return ErrUnavailable
 }
-func (NoopStore) RegisterKey(context.Context, string, string, string, string) error {
+func (NoopStore) RegisterKey(context.Context, string, string, string, string, string) error {
 	return ErrUnavailable
 }
-func (NoopStore) InvalidateNamespace(context.Context, string, string, string) error {
+func (NoopStore) InvalidateNamespace(context.Context, string, string, string, string) error {
 	return ErrUnavailable
 }
 func (NoopStore) Ping(context.Context) error { return ErrUnavailable }

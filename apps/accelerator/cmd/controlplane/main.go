@@ -69,7 +69,7 @@ func main() {
 	// Optional Redis for explicit invalidation (same as proxies)
 	if addr := os.Getenv("NANCE_REDIS_ADDR"); addr != "" {
 		if rs, err := cache.NewRedisStore(ctx, cache.Options{Addr: addr, Password: os.Getenv("NANCE_REDIS_PASSWORD")}); err == nil {
-			policySvc = policySvc.WithCache(&service.RedisInvalidator{Store: rs})
+			policySvc = policySvc.WithCache(&service.RedisInvalidator{Store: rs, Connections: pgStore})
 			defer rs.Close()
 			logger.Info("control plane redis invalidator enabled", "addr", addr)
 		} else {

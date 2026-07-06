@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/taeven/nance/accelerator/internal/controlplane/store"
 	"github.com/taeven/nance/accelerator/internal/proxy/auth"
 	"github.com/taeven/nance/accelerator/internal/proxy/cache"
 	"github.com/taeven/nance/accelerator/internal/proxy/cachedcursor"
@@ -46,10 +47,12 @@ type Deps struct {
 	Cache         *cache.Coordinator
 	CacheStats    *cachestats.Tracker // per-collection hit/miss (in-process, lock-free)
 	Policies      *policy.Engine
-	Limiter       *ratelimit.Limiter
-	Log           *slog.Logger
-	ConnID        *atomic.Int32 // global connection id counter for hello replies
-	DefaultBatch  int32
+	// Store loads connection settings (e.g. auto-invalidate on write). Optional.
+	Store        store.Store
+	Limiter      *ratelimit.Limiter
+	Log          *slog.Logger
+	ConnID       *atomic.Int32 // global connection id counter for hello replies
+	DefaultBatch int32
 }
 
 // Handler processes one OP_MSG request and returns a reply body document.
@@ -316,14 +319,40 @@ func (h *Handler) handlePassthrough(ctx context.Context, cs *ConnState, msg *wir
 		return reply, err
 	}
 
-	// Cache lifetime is TTL + explicit invalidation only (no automatic bust on writes).
-
 	// Populate cache only for opt-in (_cache suffix) reads that missed the coordinator path
 	if useCache && info.Kind == command.KindRead && collName != "" {
 		h.maybePopulateCache(ctx, tenantID, connectionID, dbName, collName, nsLabel, cmdLower, msg.Body, info, reply)
 	}
 
+	// Optional per-connection: flush cache for the written collection after a successful write.
+	if info.Kind == command.KindWrite && collName != "" && !isErrorReply(reply) {
+		h.maybeAutoInvalidateOnWrite(ctx, tenantID, connectionID, dbName, collName)
+	}
+
 	return reply, nil
+}
+
+// maybeAutoInvalidateOnWrite flushes cached reads for db.coll when the connection has the flag enabled.
+func (h *Handler) maybeAutoInvalidateOnWrite(ctx context.Context, tenantID, connectionID, dbName, collName string) {
+	if h.deps.Cache == nil || h.deps.Store == nil {
+		return
+	}
+	conn, err := h.deps.Store.GetConnection(ctx, connectionID)
+	if err != nil || conn == nil || !conn.AutoInvalidateOnWrite {
+		return
+	}
+	// Strip accidental _cache suffix on write targets (writes should use real names).
+	realColl, _ := command.ResolveCacheCollection(collName)
+	if realColl == "" {
+		realColl = collName
+	}
+	if err := h.deps.Cache.BestEffortInvalidate(ctx, tenantID, connectionID, dbName, realColl); err != nil {
+		h.deps.Log.Warn("auto-invalidate on write failed",
+			"tenant", tenantID, "connection", connectionID, "db", dbName, "coll", realColl, "error", err)
+		return
+	}
+	h.deps.Log.Debug("auto-invalidated cache after write",
+		"tenant", tenantID, "connection", connectionID, "db", dbName, "coll", realColl)
 }
 
 // tryCacheRead attempts a cache hit / singleflight miss populate for find/aggregate/etc.
@@ -408,7 +437,7 @@ func (h *Handler) tryCacheRead(
 			telemetry.CacheBypass.WithLabelValues(tenantID, "size").Inc()
 			return nil, errTooBig
 		}
-		h.deps.Cache.BestEffortSet(ctx, tenantID, dbName, collName, key, serialized, dec.TTL)
+		h.deps.Cache.BestEffortSet(ctx, tenantID, connectionID, dbName, collName, key, serialized, dec.TTL)
 		telemetry.CacheResultBytes.WithLabelValues(tenantID).Observe(float64(len(serialized)))
 		telemetry.CacheMisses.WithLabelValues(tenantID, nsLabel, cmdLower).Inc()
 		if h.deps.CacheStats != nil {
@@ -593,7 +622,7 @@ func (h *Handler) maybePopulateCache(
 	if err != nil || len(serialized) > dec.MaxResultBytes {
 		return
 	}
-	h.deps.Cache.BestEffortSet(ctx, tenantID, dbName, collName, key, serialized, dec.TTL)
+	h.deps.Cache.BestEffortSet(ctx, tenantID, connectionID, dbName, collName, key, serialized, dec.TTL)
 }
 
 func mergeDocumentSequences(cmd bson.D, seqs []wire.DocumentSequence) bson.D {

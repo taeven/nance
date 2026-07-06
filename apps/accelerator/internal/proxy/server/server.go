@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/taeven/nance/accelerator/internal/controlplane/store"
 	"github.com/taeven/nance/accelerator/internal/proxy/auth"
 	"github.com/taeven/nance/accelerator/internal/proxy/cache"
 	"github.com/taeven/nance/accelerator/internal/proxy/cachedcursor"
@@ -62,6 +63,8 @@ type Options struct {
 	CachedCursors *cachedcursor.Store
 	CacheStats    *cachestats.Tracker
 	Limiter       *ratelimit.Limiter
+	// Store is used for connection settings (auto-invalidate on write).
+	Store store.Store
 }
 
 func New(cfg *proxyconfig.Config, log *slog.Logger, validator *auth.Validator, pools *pool.Manager, cursors *cursor.Registry, opts ...Options) *Server {
@@ -93,6 +96,7 @@ func New(cfg *proxyconfig.Config, log *slog.Logger, validator *auth.Validator, p
 		CacheStats:    o.CacheStats,
 		Cache:         o.Cache,
 		Policies:      o.Policies,
+		Store:         o.Store,
 		Limiter:       o.Limiter,
 		Log:           log,
 		ConnID:        &s.connID,

@@ -1,9 +1,15 @@
 <script setup lang="ts">
 import {
   AlertTriangleIcon,
+  CableIcon,
   CopyIcon,
+  DatabaseIcon,
   KeyRoundIcon,
+  PlusIcon,
+  SettingsIcon,
+  ShieldIcon,
   Trash2Icon,
+  UsersIcon,
 } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 import type {
@@ -13,7 +19,6 @@ import type {
   IssueTokenResponse,
   OrganizationInvite,
   OrganizationMember,
-  SavingsReport,
   Tenant,
   Token,
 } from '~/types/accelerator'
@@ -54,7 +59,7 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from '@/components/ui/empty'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import {
   Select,
@@ -77,10 +82,15 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 const route = useRoute()
+const router = useRouter()
 const api = useAcceleratorApi()
 const tenantId = computed(() => String(route.params.id || ''))
 
-const tab = ref('overview')
+/** Top-level: product work vs organization administration */
+const area = ref<'connections' | 'caching' | 'members' | 'org'>('connections')
+/** Sub-panel when a connection is selected */
+const connPanel = ref<'source' | 'access' | 'cache-write'>('access')
+const showAddConnection = ref(false)
 
 const myRole = computed(() => tenant.value?.role || 'member')
 const canManage = computed(() => tenant.value?.canManage === true || myRole.value === 'owner' || myRole.value === 'admin')
@@ -90,9 +100,9 @@ const isReadOnly = computed(() => !canManage.value)
 const tenant = ref<Tenant | null>(null)
 const policy = ref<CachePolicy | null>(null)
 const tokens = ref<Token[]>([])
-const savings = ref<SavingsReport | null>(null)
 const loading = ref(true)
 const error = ref('')
+const connectionsLoading = ref(false)
 
 const connections = ref<Connection[]>([])
 const selectedConnectionId = ref<string | null>(null)
@@ -148,6 +158,10 @@ const inviteRoleOptions = computed(() => {
   ]
 })
 
+const selectedConnection = computed(() =>
+  connections.value.find(c => c.id === selectedConnectionId.value) || null,
+)
+
 async function loadTenant() {
   loading.value = true
   error.value = ''
@@ -173,14 +187,15 @@ async function loadPolicy() {
   }
 }
 
-const selectedConnection = computed(() =>
-  connections.value.find(c => c.id === selectedConnectionId.value) || null,
-)
-
 async function loadConnections() {
+  connectionsLoading.value = true
   try {
     connections.value = await api.listConnections(tenantId.value)
-    if (selectedConnectionId.value && !connections.value.some(c => c.id === selectedConnectionId.value)) {
+    const fromQuery = typeof route.query.conn === 'string' ? route.query.conn : null
+    if (fromQuery && connections.value.some(c => c.id === fromQuery)) {
+      selectedConnectionId.value = fromQuery
+    }
+    else if (selectedConnectionId.value && !connections.value.some(c => c.id === selectedConnectionId.value)) {
       selectedConnectionId.value = null
       tokens.value = []
     }
@@ -189,10 +204,14 @@ async function loadConnections() {
     }
     if (selectedConnectionId.value) {
       await loadTokens()
+      syncConnQuery()
     }
   }
   catch (e) {
     toast.error(`Connections: ${api.apiErrorMessage(e)}`)
+  }
+  finally {
+    connectionsLoading.value = false
   }
 }
 
@@ -209,24 +228,29 @@ async function loadTokens() {
   }
 }
 
-async function loadConnectionTab() {
-  await loadConnections()
+function syncConnQuery() {
+  const id = selectedConnectionId.value
+  const next = { ...route.query } as Record<string, string | string[] | undefined>
+  if (id) next.conn = id
+  else delete next.conn
+  router.replace({ query: next })
 }
 
 async function selectConnection(id: string) {
+  if (selectedConnectionId.value === id && !showAddConnection.value) return
   selectedConnectionId.value = id
   issuedToken.value = null
   updateUri.value = ''
   tokenDesc.value = ''
+  showAddConnection.value = false
+  syncConnQuery()
   await loadTokens()
 }
 
-async function loadSavings() {
-  try {
-    savings.value = await api.getSavings(tenantId.value)
-  }
-  catch (e) {
-    toast.error(`Savings: ${api.apiErrorMessage(e)}`)
+function onToggleAddConnection() {
+  showAddConnection.value = !showAddConnection.value
+  if (showAddConnection.value) {
+    selectedConnectionId.value = null
   }
 }
 
@@ -291,16 +315,17 @@ async function onRevokeInvite(inviteId: string) {
   }
 }
 
-watch(tab, async (t) => {
-  if (t === 'cache' && !policy.value) await loadPolicy()
-  if (t === 'backend') await loadConnectionTab()
-  if (t === 'savings') await loadSavings()
+watch(area, async (t) => {
+  if (t === 'caching' && !policy.value) await loadPolicy()
+  if (t === 'connections') await loadConnections()
   if (t === 'members') await loadMembers()
 })
 
 onMounted(async () => {
   await loadTenant()
-  await loadPolicy()
+  if (tenant.value) {
+    await Promise.all([loadPolicy(), loadConnections()])
+  }
 })
 
 async function createConnection() {
@@ -319,8 +344,10 @@ async function createConnection() {
     const c = await api.createConnection(tenantId.value, name, uri)
     newConnName.value = ''
     newConnUri.value = ''
-    toast.success(`Connection “${c.name}” created (URI encrypted at rest).`)
+    showAddConnection.value = false
+    toast.success(`Connection “${c.name}” created`)
     selectedConnectionId.value = c.id
+    connPanel.value = 'access'
     await loadConnections()
   }
   catch (e) {
@@ -341,7 +368,7 @@ async function saveConnectionUri() {
   try {
     await api.updateConnection(tenantId.value, selectedConnectionId.value, { uri: updateUri.value.trim() })
     updateUri.value = ''
-    toast.success('Source URI updated (encrypted). Never shown again via API.')
+    toast.success('Source URI updated (encrypted at rest)')
     await loadConnections()
   }
   catch (e) {
@@ -358,6 +385,26 @@ async function testSelectedConnection() {
   try {
     const res = await api.testConnection(tenantId.value, selectedConnectionId.value)
     toast.success(res.status || 'Connection successful')
+    await loadConnections()
+  }
+  catch (e) {
+    toast.error(api.apiErrorMessage(e))
+  }
+  finally {
+    connectionBusy.value = false
+  }
+}
+
+async function setAutoInvalidateOnWrite(enabled: boolean) {
+  if (!selectedConnectionId.value || !canManage.value) return
+  connectionBusy.value = true
+  try {
+    await api.updateConnection(tenantId.value, selectedConnectionId.value, {
+      autoInvalidateOnWrite: enabled,
+    })
+    toast.success(enabled
+      ? 'Auto-invalidate on write enabled'
+      : 'Auto-invalidate on write disabled')
     await loadConnections()
   }
   catch (e) {
@@ -406,7 +453,7 @@ async function saveDefaults() {
     }
     await api.setDefaultTtl(tenantId.value, ttl)
     await loadPolicy()
-    toast.success(`Default cache TTL set to ${ttl}s for all _cache queries`)
+    toast.success(`Default cache TTL set to ${ttl}s`)
   }
   catch (e) {
     toast.error(api.apiErrorMessage(e))
@@ -421,7 +468,7 @@ async function upsertCollection(key: string, pol: CollectionPolicy) {
   try {
     await api.setCollectionPolicy(tenantId.value, key, pol)
     await loadPolicy()
-    toast.success(`Override saved for ${key} (applies when clients use ${key.split('.').pop()}_cache)`)
+    toast.success(`Override saved for ${key}`)
   }
   catch (e) {
     toast.error(api.apiErrorMessage(e))
@@ -434,18 +481,15 @@ async function upsertCollection(key: string, pol: CollectionPolicy) {
 async function addCollection() {
   const key = newCollKey.value.trim()
   if (!key || !key.includes('.')) {
-    toast.error('Use real db.collection format (e.g. mydb.orders), not mydb.orders_cache')
+    toast.error('Use real db.collection format (e.g. mydb.orders)')
     return
   }
   if (key.endsWith('_cache')) {
-    toast.error('Use the real collection name (without _cache). Clients append _cache in queries.')
+    toast.error('Use the real collection name (without _cache)')
     return
   }
   const ttl = Number(newCollTtl.value) || Number(defaultTtl.value) || 60
-  const pol: CollectionPolicy = {
-    enabled: true,
-    ttlSeconds: ttl,
-  }
+  const pol: CollectionPolicy = { enabled: true, ttlSeconds: ttl }
   if (newCollMaxBytes.value && newCollMaxBytes.value > 0) {
     pol.maxResultBytes = Number(newCollMaxBytes.value)
   }
@@ -459,7 +503,7 @@ async function removeCollectionOverride(key: string) {
   try {
     await api.setCollectionPolicy(tenantId.value, key, { enabled: true, ttlSeconds: 0 })
     await loadPolicy()
-    toast.message(`${key} will inherit the organization default TTL (${defaultTtl.value}s)`)
+    toast.message(`${key} will inherit the default TTL (${defaultTtl.value}s)`)
   }
   catch (e) {
     toast.error(api.apiErrorMessage(e))
@@ -505,8 +549,7 @@ function issuedProxyUri(): string {
   const issued = issuedToken.value
   if (!issued) return ''
   if (issued.proxyConnectionUri) return issued.proxyConnectionUri
-  const endpoint = '127.0.0.1:27018'
-  return `mongodb://${encodeURIComponent(tenantId.value)}:${encodeURIComponent(issued.rawToken)}@${endpoint}/?authMechanism=PLAIN&authSource=$external`
+  return `mongodb://${encodeURIComponent(tenantId.value)}:${encodeURIComponent(issued.rawToken)}@127.0.0.1:27018/?authMechanism=PLAIN&authSource=$external`
 }
 
 function confirmRevoke(tokenId: string) {
@@ -601,6 +644,7 @@ async function confirmDeleteOrg() {
 
 <template>
   <div class="page-shell flex flex-col gap-6">
+    <!-- Header -->
     <div class="flex flex-col gap-3">
       <Breadcrumb>
         <BreadcrumbList>
@@ -611,7 +655,7 @@ async function confirmDeleteOrg() {
           </BreadcrumbItem>
           <BreadcrumbSeparator />
           <BreadcrumbItem>
-            <BreadcrumbPage class="font-mono text-xs">{{ tenantId }}</BreadcrumbPage>
+            <BreadcrumbPage>{{ tenant?.name || tenantId }}</BreadcrumbPage>
           </BreadcrumbItem>
         </BreadcrumbList>
       </Breadcrumb>
@@ -626,7 +670,7 @@ async function confirmDeleteOrg() {
         </div>
         <div v-if="tenant" class="flex flex-wrap items-center gap-2">
           <Badge v-if="tenant.role" :variant="roleBadgeVariant(tenant.role)">
-            your role: {{ tenant.role }}
+            {{ tenant.role }}
           </Badge>
           <Badge :variant="statusBadgeVariant(tenant.status)">{{ tenant.status }}</Badge>
         </div>
@@ -640,183 +684,131 @@ async function confirmDeleteOrg() {
 
     <div v-if="loading" class="flex flex-col gap-3">
       <Skeleton class="h-10 w-full" />
-      <Skeleton class="h-40 w-full" />
+      <Skeleton class="h-64 w-full" />
     </div>
 
     <template v-else-if="tenant">
       <Alert v-if="isReadOnly">
         <AlertTitle>View-only access</AlertTitle>
         <AlertDescription>
-          You are a <strong>member</strong> — view-only access. Admins manage settings; only an
+          You are a <strong>member</strong>. Admins manage connections and settings; only an
           <strong>owner</strong> can delete the organization.
         </AlertDescription>
       </Alert>
-      <Alert v-else-if="myRole === 'admin'">
-        <AlertTitle>Admin access</AlertTitle>
-        <AlertDescription>
-          You can manage the connection, caching, and members. Only an
-          <strong>owner</strong> can delete this organization.
-        </AlertDescription>
-      </Alert>
 
-      <Tabs v-model="tab" class="w-full flex-col gap-4">
+      <!-- Primary navigation: product vs org admin -->
+      <Tabs v-model="area" class="w-full flex-col gap-5">
         <TabsList class="h-auto w-full flex-wrap justify-start gap-1 bg-muted/50 p-1">
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="backend">Connection</TabsTrigger>
-          <TabsTrigger value="cache">Caching</TabsTrigger>
-          <TabsTrigger value="members">Members</TabsTrigger>
-          <TabsTrigger value="invalidate">Invalidate</TabsTrigger>
-          <TabsTrigger value="savings">Savings</TabsTrigger>
-          <TabsTrigger
-            v-if="canDelete"
-            value="danger"
-            class="text-destructive data-active:text-destructive"
-          >
-            Danger zone
+          <TabsTrigger value="connections" class="gap-1.5">
+            <CableIcon class="size-3.5 opacity-80" />
+            Connections
+          </TabsTrigger>
+          <TabsTrigger value="caching" class="gap-1.5">
+            <DatabaseIcon class="size-3.5 opacity-80" />
+            Caching
+          </TabsTrigger>
+          <TabsTrigger value="members" class="gap-1.5">
+            <UsersIcon class="size-3.5 opacity-80" />
+            Members
+          </TabsTrigger>
+          <TabsTrigger value="org" class="gap-1.5">
+            <SettingsIcon class="size-3.5 opacity-80" />
+            Organization
           </TabsTrigger>
         </TabsList>
 
-        <!-- Overview -->
-        <TabsContent value="overview" class="flex flex-col gap-4">
-          <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <Card size="sm">
-              <CardHeader class="pb-1">
-                <p class="wire-label">Tenant ID</p>
-              </CardHeader>
-              <CardContent>
-                <p class="truncate font-mono text-sm font-medium">{{ tenant.id }}</p>
-              </CardContent>
-            </Card>
-            <Card size="sm">
-              <CardHeader class="pb-1">
-                <p class="wire-label">Status</p>
-              </CardHeader>
-              <CardContent>
-                <p class="text-sm font-medium capitalize">{{ tenant.status }}</p>
-              </CardContent>
-            </Card>
-            <Card size="sm">
-              <CardHeader class="pb-1">
-                <p class="wire-label">Created</p>
-              </CardHeader>
-              <CardContent>
-                <p class="text-sm font-medium">{{ formatDate(tenant.created_at) }}</p>
-              </CardContent>
-            </Card>
-            <Card size="sm">
-              <CardHeader class="pb-1">
-                <p class="wire-label">Updated</p>
-              </CardHeader>
-              <CardContent>
-                <p class="text-sm font-medium">{{ formatDate(tenant.updated_at) }}</p>
-              </CardContent>
-            </Card>
-          </div>
+        <!-- ========== CONNECTIONS WORKSPACE ========== -->
+        <TabsContent value="connections" class="mt-0 flex flex-col gap-0">
+          <div class="grid gap-4 lg:grid-cols-[minmax(14rem,18rem)_minmax(0,1fr)] lg:items-start">
+            <!-- Connection picker rail -->
+            <aside class="flex flex-col gap-3 rounded-xl border border-border/80 bg-card/40 p-3">
+              <div class="flex items-center justify-between gap-2 px-1">
+                <div>
+                  <p class="text-sm font-medium">Connections</p>
+                  <p class="text-xs text-muted-foreground">
+                    Select one to manage
+                  </p>
+                </div>
+                <Button
+                  v-if="canManage"
+                  size="sm"
+                  variant="outline"
+                  class="shrink-0"
+                  @click="onToggleAddConnection"
+                >
+                  <PlusIcon data-icon="inline-start" />
+                  Add
+                </Button>
+              </div>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>How caching works</CardTitle>
-              <CardDescription>
-                Clients opt in <strong>per query</strong> by using a collection name that ends with
-                <code class="font-mono text-xs">_cache</code>. The proxy strips that suffix, reads the real collection,
-                and serves results from Redis with a default TTL of
-                <strong>{{ policy?.defaultTtlSeconds ?? defaultTtl }} seconds</strong>
-                (override under Caching). Without the suffix, every query hits MongoDB.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <ul class="flex flex-col gap-2 text-sm text-muted-foreground">
-                <li>
-                  <code class="font-mono text-xs text-foreground">db.orders_cache.find(…)</code>
-                  — cached (real collection: <code class="font-mono text-xs">orders</code>)
-                </li>
-                <li>
-                  <code class="font-mono text-xs text-foreground">db.orders.find(…)</code>
-                  — always bypasses cache
-                </li>
-                <li>
-                  Entries expire by <strong class="text-foreground">TTL</strong> (default 60s); use
-                  <strong class="text-foreground">Invalidate</strong> for a manual flush — writes do not clear cache automatically
-                </li>
-              </ul>
-            </CardContent>
-            <CardFooter class="flex flex-wrap gap-2 border-t border-border/60 pt-4">
-              <Button variant="outline" size="sm" @click="tab = 'backend'">
-                {{ canManage ? 'Configure connection' : 'View connection' }}
-              </Button>
-              <Button variant="outline" size="sm" @click="tab = 'cache'">
-                {{ canManage ? 'Configure caching' : 'View caching' }}
-              </Button>
-              <Button v-if="canManage" variant="outline" size="sm" @click="tab = 'backend'">
-                Get proxy URI
-              </Button>
-              <Button variant="outline" size="sm" @click="tab = 'members'">
-                {{ canManage ? 'Manage members' : 'View members' }}
-              </Button>
-              <Button v-if="canManage" variant="outline" size="sm" @click="tab = 'invalidate'">
-                Invalidate cache
-              </Button>
-              <Button v-if="canDelete" variant="destructive" size="sm" @click="tab = 'danger'">
-                Delete organization
-              </Button>
-            </CardFooter>
-          </Card>
-        </TabsContent>
+              <div v-if="connectionsLoading" class="flex flex-col gap-2 px-1 py-2">
+                <Skeleton class="h-12 w-full" />
+                <Skeleton class="h-12 w-full" />
+              </div>
 
-        <!-- Connections (many source Mongo + proxy access per connection) -->
-        <TabsContent value="backend" class="flex flex-col gap-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Source connections</CardTitle>
-              <CardDescription>
-                An organization can have multiple named MongoDB sources (e.g. prod, staging).
-                Each has its own encrypted URI and proxy access credentials.
-                Apps never use the source URI — they use a <strong>proxy connection URI</strong> issued per connection.
-              </CardDescription>
-            </CardHeader>
-            <CardContent class="flex flex-col gap-4">
-              <Empty v-if="!connections.length" class="border border-dashed py-8">
+              <Empty
+                v-else-if="!connections.length && !showAddConnection"
+                class="border border-dashed py-8"
+              >
                 <EmptyHeader>
-                  <EmptyTitle>No connections yet</EmptyTitle>
+                  <EmptyMedia variant="icon">
+                    <CableIcon />
+                  </EmptyMedia>
+                  <EmptyTitle>No connections</EmptyTitle>
                   <EmptyDescription>
-                    Add a source MongoDB connection to start issuing proxy access.
+                    Add a source MongoDB to get proxy access URIs for your apps.
                   </EmptyDescription>
                 </EmptyHeader>
+                <Button v-if="canManage" class="mt-2" @click="showAddConnection = true">
+                  <PlusIcon data-icon="inline-start" />
+                  Add connection
+                </Button>
               </Empty>
 
-              <div v-else class="flex flex-col gap-2">
+              <nav v-else class="flex flex-col gap-1" aria-label="Connection list">
                 <button
                   v-for="c in connections"
                   :key="c.id"
                   type="button"
-                  class="flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left transition-colors"
-                  :class="c.id === selectedConnectionId
-                    ? 'border-primary bg-primary/5'
-                    : 'border-border/80 hover:bg-muted/40'"
+                  class="flex flex-col gap-1 rounded-lg border px-3 py-2.5 text-left transition-colors"
+                  :class="!showAddConnection && c.id === selectedConnectionId
+                    ? 'border-primary/60 bg-primary/10 shadow-[inset_0_0_0_1px] shadow-primary/20'
+                    : 'border-transparent bg-transparent hover:bg-muted/50'"
                   @click="selectConnection(c.id)"
                 >
-                  <div class="flex flex-col gap-0.5">
-                    <span class="text-sm font-medium">{{ c.name }}</span>
-                    <span class="font-mono text-xs text-muted-foreground">{{ c.id }}</span>
-                  </div>
-                  <div class="flex flex-wrap items-center gap-2">
-                    <Badge v-if="c.lastValidatedAt" variant="default">validated</Badge>
-                    <Badge v-else variant="secondary">not tested</Badge>
-                    <span class="text-xs text-muted-foreground">{{ formatDate(c.created_at) }}</span>
-                  </div>
+                  <span class="flex items-center justify-between gap-2">
+                    <span class="truncate text-sm font-medium">{{ c.name }}</span>
+                    <Badge
+                      v-if="c.autoInvalidateOnWrite"
+                      variant="outline"
+                      class="shrink-0 text-[10px]"
+                    >
+                      write-flush
+                    </Badge>
+                  </span>
+                  <span class="truncate font-mono text-[10px] text-muted-foreground">{{ c.id }}</span>
                 </button>
-              </div>
+              </nav>
+            </aside>
 
-              <template v-if="canManage">
-                <div class="flex flex-col gap-3 border-t border-border/60 pt-4">
-                  <p class="wire-label">Add connection</p>
+            <!-- Main panel -->
+            <div class="flex min-w-0 flex-col gap-4">
+              <!-- Add connection form -->
+              <Card v-if="showAddConnection && canManage">
+                <CardHeader>
+                  <CardTitle>New connection</CardTitle>
+                  <CardDescription>
+                    A named source MongoDB for this organization. The URI is encrypted and never shown again.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent class="flex flex-col gap-4">
                   <div class="grid gap-3 sm:grid-cols-2">
                     <Field class="gap-1.5">
                       <FieldLabel for="new-conn-name">Name</FieldLabel>
                       <Input
                         id="new-conn-name"
                         v-model="newConnName"
-                        placeholder="prod, staging, …"
+                        placeholder="prod, staging, analytics…"
                         :disabled="connectionBusy"
                       />
                     </Field>
@@ -827,206 +819,358 @@ async function confirmDeleteOrg() {
                         v-model="newConnUri"
                         class="font-mono"
                         type="password"
-                        placeholder="mongodb://user:pass@host:27017/db?…"
+                        placeholder="mongodb://user:pass@host:27017/?…"
                         autocomplete="off"
                         :disabled="connectionBusy"
                       />
+                      <FieldDescription>
+                        Apps will not use this URI — they use a proxy URI you create under Access.
+                      </FieldDescription>
                     </Field>
                   </div>
-                  <Button class="w-fit" :disabled="connectionBusy" @click="createConnection">
+                </CardContent>
+                <CardFooter class="flex flex-wrap gap-2 border-t border-border/60 pt-4">
+                  <Button :disabled="connectionBusy" @click="createConnection">
                     <Spinner v-if="connectionBusy" data-icon="inline-start" />
-                    {{ connectionBusy ? 'Working…' : 'Add connection' }}
+                    Create connection
                   </Button>
-                </div>
-              </template>
-            </CardContent>
-          </Card>
-
-          <template v-if="selectedConnection">
-            <Card>
-              <CardHeader>
-                <CardTitle>{{ selectedConnection.name }}</CardTitle>
-                <CardDescription>
-                  Update the encrypted source URI or test connectivity.
-                  <span class="font-mono text-xs">{{ selectedConnection.id }}</span>
-                </CardDescription>
-              </CardHeader>
-              <CardContent class="flex flex-col gap-4">
-                <div class="flex flex-wrap items-center gap-2 text-sm">
-                  <Badge v-if="selectedConnection.lastValidatedAt">
-                    last validated {{ formatDate(selectedConnection.lastValidatedAt) }}
-                  </Badge>
-                  <Badge v-else variant="secondary">not tested yet</Badge>
-                </div>
-                <Field v-if="canManage" class="gap-1.5">
-                  <FieldLabel for="update-uri">Replace source URI</FieldLabel>
-                  <Input
-                    id="update-uri"
-                    v-model="updateUri"
-                    class="font-mono"
-                    type="password"
-                    placeholder="mongodb://…"
-                    autocomplete="off"
-                    :disabled="connectionBusy"
-                  />
-                  <FieldDescription>Leave blank unless rotating the source cluster credentials.</FieldDescription>
-                </Field>
-              </CardContent>
-              <CardFooter class="flex flex-wrap gap-2 border-t border-border/60 pt-4">
-                <Button
-                  v-if="canManage"
-                  :disabled="connectionBusy || !updateUri.trim()"
-                  @click="saveConnectionUri"
-                >
-                  Save new URI
-                </Button>
-                <Button variant="outline" :disabled="connectionBusy" @click="testSelectedConnection">
-                  Test connection
-                </Button>
-                <Button
-                  v-if="canManage"
-                  variant="destructive"
-                  :disabled="connectionBusy"
-                  @click="confirmDeleteConnection(selectedConnection.id)"
-                >
-                  <Trash2Icon data-icon="inline-start" />
-                  Delete connection
-                </Button>
-              </CardFooter>
-            </Card>
-
-            <Card v-if="canManage">
-              <CardHeader>
-                <CardTitle>Proxy access</CardTitle>
-                <CardDescription>
-                  Credentials for this connection only. Clients use the proxy URI (username = org id);
-                  traffic is routed to this source MongoDB.
-                </CardDescription>
-              </CardHeader>
-              <CardContent class="flex flex-col gap-4">
-                <div class="flex flex-wrap items-end gap-3">
-                  <Field class="min-w-48 flex-1">
-                    <FieldLabel>Label (optional)</FieldLabel>
-                    <Input
-                      v-model="tokenDesc"
-                      placeholder="ci-bot, local-dev, …"
-                      :disabled="tokenBusy"
-                    />
-                  </Field>
-                  <Button :disabled="tokenBusy" @click="issueToken">
-                    <Spinner v-if="tokenBusy" data-icon="inline-start" />
-                    {{ tokenBusy ? 'Creating…' : 'Create access' }}
+                  <Button variant="ghost" :disabled="connectionBusy" @click="showAddConnection = false">
+                    Cancel
                   </Button>
-                </div>
+                </CardFooter>
+              </Card>
 
-                <div v-if="issuedToken" class="token-reveal">
-                  <p class="wire-label text-amber-500">Proxy connection URI — copy now, shown only once</p>
-                  <code class="block break-all">{{ issuedProxyUri() }}</code>
-                  <div class="mt-3 flex flex-wrap gap-2">
-                    <Button variant="outline" size="sm" @click="copyText(issuedProxyUri())">
-                      <CopyIcon data-icon="inline-start" />
-                      Copy proxy URI
-                    </Button>
-                    <Button variant="ghost" size="sm" @click="copyText(issuedToken!.rawToken)">
-                      Copy raw token
-                    </Button>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-            <Alert v-else>
-              <KeyRoundIcon />
-              <AlertTitle>Read-only for proxy access</AlertTitle>
-              <AlertDescription>
-                Members can list credentials; only admins and owners can create or revoke them.
-              </AlertDescription>
-            </Alert>
-
-            <Card class="overflow-hidden p-0">
-              <CardHeader class="border-b border-border/60 px-6 py-4">
-                <CardTitle class="text-base">Active credentials — {{ selectedConnection.name }}</CardTitle>
-              </CardHeader>
-              <Empty v-if="!tokens.length" class="py-10">
+              <!-- Empty selection -->
+              <Empty
+                v-else-if="!selectedConnection"
+                class="min-h-64 border border-dashed py-12"
+              >
                 <EmptyHeader>
                   <EmptyMedia variant="icon">
-                    <KeyRoundIcon />
+                    <CableIcon />
                   </EmptyMedia>
-                  <EmptyTitle>No proxy access yet</EmptyTitle>
+                  <EmptyTitle>Select a connection</EmptyTitle>
                   <EmptyDescription>
-                    Create access to get a proxy connection URI for this source.
+                    Choose a connection from the list to manage its source URI, proxy access, and write-cache behavior.
                   </EmptyDescription>
                 </EmptyHeader>
               </Empty>
-              <Table v-else>
-                <TableHeader>
-                  <TableRow class="hover:bg-transparent">
-                    <TableHead>ID</TableHead>
-                    <TableHead>Label</TableHead>
-                    <TableHead>Created</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead class="w-24" />
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  <TableRow v-for="tok in tokens" :key="tok.id">
-                    <TableCell class="font-mono text-xs">{{ tok.id }}</TableCell>
-                    <TableCell>{{ tok.description || '—' }}</TableCell>
-                    <TableCell class="text-sm text-muted-foreground">{{ formatDate(tok.created_at) }}</TableCell>
-                    <TableCell>
-                      <Badge v-if="tok.revoked_at" variant="destructive">revoked</Badge>
-                      <Badge v-else>active</Badge>
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        v-if="!tok.revoked_at && canManage"
-                        variant="destructive"
-                        size="sm"
-                        @click="confirmRevoke(tok.id)"
+
+              <!-- Selected connection workspace -->
+              <template v-else>
+                <div class="flex flex-wrap items-start justify-between gap-3 rounded-xl border border-border/80 bg-card/30 px-4 py-3">
+                  <div class="flex min-w-0 flex-col gap-0.5">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <h2 class="truncate text-lg font-semibold tracking-tight">
+                        {{ selectedConnection.name }}
+                      </h2>
+                      <Badge v-if="selectedConnection.lastValidatedAt" variant="default">
+                        validated
+                      </Badge>
+                      <Badge v-else variant="secondary">
+                        not tested
+                      </Badge>
+                      <Badge
+                        v-if="selectedConnection.autoInvalidateOnWrite"
+                        variant="outline"
                       >
-                        Revoke
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                </TableBody>
-              </Table>
-            </Card>
-          </template>
+                        auto-invalidate on
+                      </Badge>
+                    </div>
+                    <p class="font-mono text-xs text-muted-foreground">
+                      {{ selectedConnection.id }}
+                      <span v-if="selectedConnection.lastValidatedAt">
+                        · last validated {{ formatDate(selectedConnection.lastValidatedAt) }}
+                      </span>
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    :disabled="connectionBusy"
+                    @click="testSelectedConnection"
+                  >
+                    <Spinner v-if="connectionBusy" data-icon="inline-start" />
+                    Test source
+                  </Button>
+                </div>
+
+                <Tabs v-model="connPanel" class="w-full flex-col gap-4">
+                  <TabsList class="h-auto w-full flex-wrap justify-start gap-1 bg-muted/40 p-1">
+                    <TabsTrigger value="access">Proxy access</TabsTrigger>
+                    <TabsTrigger value="source">Source database</TabsTrigger>
+                    <TabsTrigger value="cache-write">Cache on write</TabsTrigger>
+                  </TabsList>
+
+                  <!-- Proxy access (primary product surface) -->
+                  <TabsContent value="access" class="mt-0 flex flex-col gap-4">
+                    <Card v-if="canManage">
+                      <CardHeader>
+                        <CardTitle class="flex items-center gap-2 text-base">
+                          <KeyRoundIcon class="size-4 text-primary" />
+                          Create access
+                        </CardTitle>
+                        <CardDescription>
+                          Issue a proxy connection URI for apps. Username is this organization id;
+                          traffic routes to <strong>{{ selectedConnection.name }}</strong>.
+                          The full URI is shown only once.
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent class="flex flex-col gap-4">
+                        <div class="flex flex-wrap items-end gap-3">
+                          <Field class="min-w-48 flex-1 gap-1.5">
+                            <FieldLabel>Label (optional)</FieldLabel>
+                            <Input
+                              v-model="tokenDesc"
+                              placeholder="ci-bot, local-dev…"
+                              :disabled="tokenBusy"
+                            />
+                          </Field>
+                          <Button :disabled="tokenBusy" @click="issueToken">
+                            <Spinner v-if="tokenBusy" data-icon="inline-start" />
+                            {{ tokenBusy ? 'Creating…' : 'Create access' }}
+                          </Button>
+                        </div>
+                        <div v-if="issuedToken" class="token-reveal">
+                          <p class="wire-label text-amber-500">
+                            Proxy connection URI — copy now, shown only once
+                          </p>
+                          <code class="block break-all">{{ issuedProxyUri() }}</code>
+                          <div class="mt-3 flex flex-wrap gap-2">
+                            <Button variant="outline" size="sm" @click="copyText(issuedProxyUri())">
+                              <CopyIcon data-icon="inline-start" />
+                              Copy proxy URI
+                            </Button>
+                            <Button variant="ghost" size="sm" @click="copyText(issuedToken!.rawToken)">
+                              Copy raw token
+                            </Button>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                    <Alert v-else>
+                      <KeyRoundIcon />
+                      <AlertTitle>Read-only</AlertTitle>
+                      <AlertDescription>
+                        Members can view credentials; only admins and owners can create or revoke them.
+                      </AlertDescription>
+                    </Alert>
+
+                    <Card class="overflow-hidden p-0">
+                      <CardHeader class="border-b border-border/60 px-6 py-4">
+                        <CardTitle class="text-base">Active credentials</CardTitle>
+                        <CardDescription>
+                          Each row is one proxy secret for this connection. Secrets cannot be shown again after creation.
+                        </CardDescription>
+                      </CardHeader>
+                      <Empty v-if="!tokens.length" class="py-10">
+                        <EmptyHeader>
+                          <EmptyMedia variant="icon">
+                            <KeyRoundIcon />
+                          </EmptyMedia>
+                          <EmptyTitle>No credentials yet</EmptyTitle>
+                          <EmptyDescription>
+                            Create access to copy a ready-to-use proxy URI for your apps.
+                          </EmptyDescription>
+                        </EmptyHeader>
+                      </Empty>
+                      <Table v-else>
+                        <TableHeader>
+                          <TableRow class="hover:bg-transparent">
+                            <TableHead>ID</TableHead>
+                            <TableHead>Label</TableHead>
+                            <TableHead>Created</TableHead>
+                            <TableHead>Status</TableHead>
+                            <TableHead class="w-24" />
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          <TableRow v-for="tok in tokens" :key="tok.id">
+                            <TableCell class="font-mono text-xs">{{ tok.id }}</TableCell>
+                            <TableCell>{{ tok.description || '—' }}</TableCell>
+                            <TableCell class="text-sm text-muted-foreground">
+                              {{ formatDate(tok.created_at) }}
+                            </TableCell>
+                            <TableCell>
+                              <Badge v-if="tok.revoked_at" variant="destructive">revoked</Badge>
+                              <Badge v-else>active</Badge>
+                            </TableCell>
+                            <TableCell>
+                              <Button
+                                v-if="!tok.revoked_at && canManage"
+                                variant="destructive"
+                                size="sm"
+                                @click="confirmRevoke(tok.id)"
+                              >
+                                Revoke
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        </TableBody>
+                      </Table>
+                    </Card>
+                  </TabsContent>
+
+                  <!-- Source database -->
+                  <TabsContent value="source" class="mt-0 flex flex-col gap-4">
+                    <Card>
+                      <CardHeader>
+                        <CardTitle class="text-base">Source MongoDB</CardTitle>
+                        <CardDescription>
+                          Real cluster URI for <strong>{{ selectedConnection.name }}</strong>.
+                          Encrypted at rest; never returned by the API after save.
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent v-if="canManage" class="flex flex-col gap-4">
+                        <Field class="gap-1.5">
+                          <FieldLabel for="update-uri">Replace source URI</FieldLabel>
+                          <Input
+                            id="update-uri"
+                            v-model="updateUri"
+                            class="font-mono"
+                            type="password"
+                            placeholder="mongodb://…"
+                            autocomplete="off"
+                            :disabled="connectionBusy"
+                          />
+                          <FieldDescription>
+                            Leave blank unless rotating credentials. Use Test to verify the currently stored URI.
+                          </FieldDescription>
+                        </Field>
+                      </CardContent>
+                      <CardContent v-else>
+                        <p class="text-sm text-muted-foreground">
+                          Members can test connectivity but cannot change the source URI.
+                        </p>
+                      </CardContent>
+                      <CardFooter class="flex flex-wrap gap-2 border-t border-border/60 pt-4">
+                        <Button
+                          v-if="canManage"
+                          :disabled="connectionBusy || !updateUri.trim()"
+                          @click="saveConnectionUri"
+                        >
+                          Save new URI
+                        </Button>
+                        <Button variant="outline" :disabled="connectionBusy" @click="testSelectedConnection">
+                          Test connection
+                        </Button>
+                        <Button
+                          v-if="canManage"
+                          variant="destructive"
+                          :disabled="connectionBusy"
+                          @click="confirmDeleteConnection(selectedConnection.id)"
+                        >
+                          <Trash2Icon data-icon="inline-start" />
+                          Delete connection
+                        </Button>
+                      </CardFooter>
+                    </Card>
+                  </TabsContent>
+
+                  <!-- Cache on write -->
+                  <TabsContent value="cache-write" class="mt-0 flex flex-col gap-4">
+                    <Card>
+                      <CardHeader>
+                        <CardTitle class="text-base">Auto-invalidate on write</CardTitle>
+                        <CardDescription>
+                          When off (default), cached <code class="font-mono text-xs">*_cache</code> reads
+                          expire by TTL only. When on, a successful write through the proxy flushes
+                          all cached queries for that collection on this connection.
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent class="flex flex-col gap-4">
+                        <div class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 px-3 py-3">
+                          <div>
+                            <p class="text-sm font-medium">Status for {{ selectedConnection.name }}</p>
+                            <p class="text-xs text-muted-foreground">
+                              {{ selectedConnection.autoInvalidateOnWrite ? 'Writes flush collection cache' : 'TTL and manual invalidate only' }}
+                            </p>
+                          </div>
+                          <div class="flex items-center gap-2">
+                            <Badge :variant="selectedConnection.autoInvalidateOnWrite ? 'default' : 'secondary'">
+                              {{ selectedConnection.autoInvalidateOnWrite ? 'enabled' : 'disabled' }}
+                            </Badge>
+                            <template v-if="canManage">
+                              <Button
+                                v-if="!selectedConnection.autoInvalidateOnWrite"
+                                size="sm"
+                                :disabled="connectionBusy"
+                                @click="setAutoInvalidateOnWrite(true)"
+                              >
+                                Enable
+                              </Button>
+                              <Button
+                                v-else
+                                size="sm"
+                                variant="outline"
+                                :disabled="connectionBusy"
+                                @click="setAutoInvalidateOnWrite(false)"
+                              >
+                                Disable
+                              </Button>
+                            </template>
+                          </div>
+                        </div>
+
+                        <Alert variant="destructive">
+                          <AlertTriangleIcon />
+                          <AlertTitle>Performance warning</AlertTitle>
+                          <AlertDescription class="flex flex-col gap-2 text-sm">
+                            <p>
+                              Every successful write flushes <strong>all</strong> cached query shapes for that
+                              <code class="font-mono text-xs">db.collection</code> on this connection — not only
+                              the documents you changed.
+                            </p>
+                            <p>
+                              <strong>Example:</strong>
+                              writing one order per second while dashboards run
+                              <code class="font-mono text-xs">db.orders_cache.find(&#123; status: "open" &#125;)</code>
+                              will clear that cache on every write. The next read misses Mongo, re-fills Redis,
+                              then the next write clears it again — continuous thrash and little cache benefit.
+                            </p>
+                            <p>
+                              Prefer the default (TTL + manual invalidate under Organization) for high write rates.
+                              Enable when freshness after writes matters more than write amplification.
+                            </p>
+                          </AlertDescription>
+                        </Alert>
+                      </CardContent>
+                    </Card>
+                  </TabsContent>
+                </Tabs>
+              </template>
+            </div>
+          </div>
         </TabsContent>
 
-        <!-- Caching -->
-        <TabsContent value="cache" class="flex flex-col gap-4">
+        <!-- ========== CACHING (org-wide) ========== -->
+        <TabsContent value="caching" class="mt-0 flex flex-col gap-4">
+          <Alert>
+            <DatabaseIcon />
+            <AlertTitle>Organization-wide cache policy</AlertTitle>
+            <AlertDescription>
+              TTL defaults and overrides apply to every connection in this organization.
+              Clients opt in per query with a <code class="font-mono text-xs">_cache</code> collection suffix.
+            </AlertDescription>
+          </Alert>
+
           <Card class="border-primary/25 bg-primary/5">
             <CardHeader>
-              <CardTitle>
+              <CardTitle class="text-base">
                 Opt-in with <code class="font-mono text-sm">_cache</code>
               </CardTitle>
               <CardDescription>
-                Every collection is eligible for caching. Developers choose per query by appending
-                <code class="font-mono text-xs">_cache</code> to the collection name. No policy toggle is required to turn caching on.
+                <code class="font-mono text-xs">db.orders_cache.find(…)</code> is cached;
+                <code class="font-mono text-xs">db.orders.find(…)</code> always hits MongoDB.
               </CardDescription>
             </CardHeader>
-            <CardContent class="flex flex-col gap-2">
-              <div class="flex flex-wrap items-center gap-2 rounded-lg border border-border/80 bg-background/60 px-3 py-2">
-                <Badge>cached</Badge>
-                <code class="font-mono text-xs">db.orders_cache.find(&#123; status: "open" &#125;)</code>
-                <span class="text-xs text-muted-foreground">
-                  → real <code class="font-mono">orders</code> · TTL {{ policy?.defaultTtlSeconds ?? defaultTtl }}s unless overridden
-                </span>
-              </div>
-              <div class="flex flex-wrap items-center gap-2 rounded-lg border border-border/80 bg-background/60 px-3 py-2">
-                <Badge variant="secondary">bypass</Badge>
-                <code class="font-mono text-xs">db.orders.find(&#123; status: "open" &#125;)</code>
-                <span class="text-xs text-muted-foreground">→ always MongoDB, never Redis</span>
-              </div>
-            </CardContent>
           </Card>
 
           <Card>
             <CardHeader>
-              <CardTitle>Default TTL</CardTitle>
+              <CardTitle class="text-base">Default TTL</CardTitle>
               <CardDescription>
-                Applied to <strong>all</strong> <code class="font-mono text-xs">*_cache</code> queries for this organization
-                unless a per-collection override is set below. Platform default is <strong>60 seconds</strong>.
+                Applied to all <code class="font-mono text-xs">*_cache</code> queries unless a per-collection override is set.
               </CardDescription>
             </CardHeader>
             <CardContent class="flex flex-col gap-4">
@@ -1052,28 +1196,20 @@ async function confirmDeleteOrg() {
                   {{ defaultsBusy ? 'Saving…' : 'Save default TTL' }}
                 </Button>
               </div>
-              <FieldDescription class="!mt-0">
-                Example: 60 caches results for one minute after each miss.
-              </FieldDescription>
-              <p v-if="!canManage" class="text-sm text-muted-foreground">
-                Only admins and owners can change TTL settings.
-              </p>
               <p v-if="policy" class="text-xs text-muted-foreground">
                 Active default: <strong class="text-foreground">{{ policy.defaultTtlSeconds }}s</strong>
-                · Cache key version: {{ policy.cacheKeyVersion }}
-                · Updated {{ formatDate(policy.updatedAt) }}
+                · key version {{ policy.cacheKeyVersion }}
+                · updated {{ formatDate(policy.updatedAt) }}
               </p>
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader>
-              <CardTitle>Per-collection overrides</CardTitle>
+              <CardTitle class="text-base">Per-collection overrides</CardTitle>
               <CardDescription>
-                Optional. Use the <strong>real</strong> collection name
-                (<code class="font-mono text-xs">db.orders</code>, not
-                <code class="font-mono text-xs">db.orders_cache</code>) to set a different TTL or max cached result size.
-                Leave empty to use the organization default ({{ policy?.defaultTtlSeconds ?? defaultTtl }}s).
+                Use the real collection name (<code class="font-mono text-xs">db.orders</code>, not
+                <code class="font-mono text-xs">db.orders_cache</code>).
               </CardDescription>
             </CardHeader>
             <CardContent class="flex flex-col gap-4">
@@ -1081,8 +1217,7 @@ async function confirmDeleteOrg() {
                 <EmptyHeader>
                   <EmptyTitle>No overrides</EmptyTitle>
                   <EmptyDescription>
-                    All <code class="font-mono text-xs">*_cache</code> queries use the default TTL above.
-                    Add an override only when a hot collection needs a shorter or longer TTL.
+                    All <code class="font-mono text-xs">*_cache</code> queries use the default TTL.
                   </EmptyDescription>
                 </EmptyHeader>
               </Empty>
@@ -1163,44 +1298,68 @@ async function confirmDeleteOrg() {
                         :disabled="collBusy"
                       />
                     </Field>
-                    <Button
-                      class="w-full lg:w-auto"
-                      :disabled="collBusy"
-                      @click="addCollection"
-                    >
+                    <Button class="w-full lg:w-auto" :disabled="collBusy" @click="addCollection">
                       <Spinner v-if="collBusy" data-icon="inline-start" />
                       Save override
                     </Button>
                   </div>
-                  <FieldDescription class="!mt-0">
-                    Use the real collection name, not <code class="font-mono">mydb.orders_cache</code>.
-                  </FieldDescription>
                 </div>
               </template>
             </CardContent>
           </Card>
+
+          <Card v-if="canManage">
+            <CardHeader>
+              <CardTitle class="text-base">Manual invalidate</CardTitle>
+              <CardDescription>
+                Flush cache for a real collection or tags across all connections in this organization.
+              </CardDescription>
+            </CardHeader>
+            <CardContent class="grid gap-3 sm:grid-cols-3">
+              <Field class="gap-1.5">
+                <FieldLabel>Database</FieldLabel>
+                <Input v-model="invDb" class="font-mono" placeholder="mydb" :disabled="invBusy" />
+              </Field>
+              <Field class="gap-1.5">
+                <FieldLabel>Collection</FieldLabel>
+                <Input v-model="invColl" class="font-mono" placeholder="orders" :disabled="invBusy" />
+              </Field>
+              <Field class="gap-1.5">
+                <FieldLabel>Tags (comma-separated)</FieldLabel>
+                <Input v-model="invTags" placeholder="optional" :disabled="invBusy" />
+              </Field>
+            </CardContent>
+            <CardFooter class="border-t border-border/60 pt-4">
+              <Button :disabled="invBusy" @click="runInvalidate">
+                <Spinner v-if="invBusy" data-icon="inline-start" />
+                Invalidate
+              </Button>
+            </CardFooter>
+          </Card>
         </TabsContent>
 
-        <!-- Members -->
-        <TabsContent value="members">
+        <!-- ========== MEMBERS ========== -->
+        <TabsContent value="members" class="mt-0">
           <Card>
             <CardHeader>
-              <CardTitle>User management</CardTitle>
+              <CardTitle class="flex items-center gap-2">
+                <UsersIcon class="size-4 text-primary" />
+                Team
+              </CardTitle>
               <CardDescription>
-                <strong>member</strong> — read-only.
-                <strong>admin</strong> — manage settings (not delete org).
+                <strong>member</strong> — read-only ·
+                <strong>admin</strong> — manage connections and settings ·
                 <strong>owner</strong> — full control including deletion.
-                Invitees sign in with the invited email and accept from Organizations.
               </CardDescription>
             </CardHeader>
             <CardContent class="flex flex-col gap-6">
               <template v-if="canManage">
                 <div class="grid gap-3 sm:grid-cols-2">
-                  <Field>
+                  <Field class="gap-1.5">
                     <FieldLabel>Email</FieldLabel>
                     <Input v-model="inviteEmail" type="email" placeholder="teammate@company.com" :disabled="membersBusy" />
                   </Field>
-                  <Field>
+                  <Field class="gap-1.5">
                     <FieldLabel>Role</FieldLabel>
                     <Select v-model="inviteRole" :disabled="membersBusy">
                       <SelectTrigger class="w-full">
@@ -1227,7 +1386,9 @@ async function confirmDeleteOrg() {
                   </Button>
                 </div>
               </template>
-              <p v-else class="text-sm text-muted-foreground">Members cannot invite or remove users.</p>
+              <p v-else class="text-sm text-muted-foreground">
+                Only admins and owners can invite or remove members.
+              </p>
 
               <div class="flex flex-col gap-2">
                 <p class="wire-label">Members</p>
@@ -1283,7 +1444,7 @@ async function confirmDeleteOrg() {
                         <TableCell>
                           <Badge :variant="roleBadgeVariant(inv.role)">{{ inv.role }}</Badge>
                         </TableCell>
-                        <TableCell class="text-sm text-muted-foreground">{{ inv.expires_at }}</TableCell>
+                        <TableCell class="text-sm text-muted-foreground">{{ formatDate(inv.expires_at) }}</TableCell>
                         <TableCell>
                           <Button
                             variant="ghost"
@@ -1303,158 +1464,108 @@ async function confirmDeleteOrg() {
           </Card>
         </TabsContent>
 
-        <!-- Invalidate -->
-        <TabsContent value="invalidate">
+        <!-- ========== ORGANIZATION SETTINGS ========== -->
+        <TabsContent value="org" class="mt-0 flex flex-col gap-4">
+          <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Card size="sm">
+              <CardHeader class="pb-1">
+                <p class="wire-label">Tenant ID</p>
+              </CardHeader>
+              <CardContent>
+                <p class="truncate font-mono text-sm font-medium">{{ tenant.id }}</p>
+              </CardContent>
+            </Card>
+            <Card size="sm">
+              <CardHeader class="pb-1">
+                <p class="wire-label">Status</p>
+              </CardHeader>
+              <CardContent>
+                <p class="text-sm font-medium capitalize">{{ tenant.status }}</p>
+              </CardContent>
+            </Card>
+            <Card size="sm">
+              <CardHeader class="pb-1">
+                <p class="wire-label">Created</p>
+              </CardHeader>
+              <CardContent>
+                <p class="text-sm font-medium">{{ formatDate(tenant.created_at) }}</p>
+              </CardContent>
+            </Card>
+            <Card size="sm">
+              <CardHeader class="pb-1">
+                <p class="wire-label">Your role</p>
+              </CardHeader>
+              <CardContent>
+                <Badge v-if="tenant.role" :variant="roleBadgeVariant(tenant.role)">{{ tenant.role }}</Badge>
+              </CardContent>
+            </Card>
+          </div>
+
           <Card>
             <CardHeader>
-              <CardTitle>Explicit cache invalidation</CardTitle>
-              <CardDescription>
-                Flush Redis entries for this organization. Use the <strong>real</strong> collection name
-                (e.g. <code class="font-mono text-xs">orders</code>), matching what was stored from
-                <code class="font-mono text-xs">orders_cache</code> reads.
-                The proxy does <strong>not</strong> invalidate on write — only TTL expiry and this explicit action clear cached results.
-              </CardDescription>
+              <CardTitle class="flex items-center gap-2 text-base">
+                <ShieldIcon class="size-4 text-primary" />
+                How this organization works
+              </CardTitle>
             </CardHeader>
-            <CardContent>
-              <FieldGroup>
-                <div class="grid gap-3 sm:grid-cols-2">
-                  <Field>
-                    <FieldLabel>Database (optional)</FieldLabel>
-                    <Input v-model="invDb" class="font-mono" placeholder="mydb" :disabled="invBusy" />
-                  </Field>
-                  <Field>
-                    <FieldLabel>Real collection (optional)</FieldLabel>
-                    <Input v-model="invColl" class="font-mono" placeholder="orders" :disabled="invBusy" />
-                    <FieldDescription>Not <code class="font-mono">orders_cache</code></FieldDescription>
-                  </Field>
-                </div>
-                <Field>
-                  <FieldLabel>Tags (optional, comma-separated)</FieldLabel>
-                  <Input v-model="invTags" class="font-mono" placeholder="user:1, order:99" :disabled="invBusy" />
-                </Field>
-              </FieldGroup>
+            <CardContent class="flex flex-col gap-2 text-sm text-muted-foreground">
+              <p>
+                <strong class="text-foreground">Connections</strong> hold source Mongo URIs and proxy credentials.
+                Pick a connection to issue app URIs.
+              </p>
+              <p>
+                <strong class="text-foreground">Caching</strong> is org-wide TTL policy. Clients opt in with
+                <code class="font-mono text-xs">_cache</code> on collection names.
+              </p>
+              <p>
+                <strong class="text-foreground">Members</strong> control who can manage this org.
+              </p>
             </CardContent>
-            <CardFooter class="border-t border-border/60 pt-4">
-              <Button
-                v-if="canManage"
-                variant="destructive"
-                :disabled="invBusy"
-                @click="runInvalidate"
-              >
-                <Spinner v-if="invBusy" data-icon="inline-start" />
-                {{ invBusy ? 'Invalidating…' : 'Invalidate cache' }}
+            <CardFooter class="flex flex-wrap gap-2 border-t border-border/60 pt-4">
+              <Button variant="outline" size="sm" @click="area = 'connections'">
+                Open connections
               </Button>
-              <p v-else class="text-sm text-muted-foreground">Only admins and owners can invalidate cache.</p>
+              <Button variant="outline" size="sm" @click="area = 'caching'">
+                Open caching
+              </Button>
+              <Button variant="outline" size="sm" @click="area = 'members'">
+                Open members
+              </Button>
             </CardFooter>
           </Card>
-        </TabsContent>
 
-        <!-- Savings -->
-        <TabsContent value="savings">
-          <Card>
+          <Card v-if="canDelete" class="border-destructive/40">
             <CardHeader>
-              <CardTitle>Savings / metrics</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div v-if="!savings" class="flex items-center gap-2 text-sm text-muted-foreground">
-                <Spinner />
-                Loading…
-              </div>
-              <template v-else>
-                <p class="mb-4 text-sm text-muted-foreground">{{ savings.note }}</p>
-                <p class="wire-label mb-2">Suggested Prometheus queries</p>
-                <ul class="flex flex-col gap-2">
-                  <li
-                    v-for="(q, i) in savings.suggestedQueries"
-                    :key="i"
-                    class="rounded-md border border-border/80 bg-muted/30 px-3 py-2"
-                  >
-                    <code class="break-all font-mono text-xs">{{ q }}</code>
-                  </li>
-                </ul>
-              </template>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <!-- Danger -->
-        <TabsContent v-if="canDelete" value="danger">
-          <Card class="border-destructive/40 bg-destructive/5">
-            <CardHeader>
-              <CardTitle class="flex items-center gap-2 text-destructive">
-                <AlertTriangleIcon class="size-4" />
-                Delete organization
-              </CardTitle>
+              <CardTitle class="text-base text-destructive">Danger zone</CardTitle>
               <CardDescription>
-                Permanently remove <strong>{{ tenant?.name }}</strong>
-                (<code class="font-mono text-xs">{{ tenantId }}</code>) and
-                <strong>all related data</strong>: members, invites, backend connection, cache policies, proxy tokens, and audit history.
-                This cannot be undone. Only <strong>owners</strong> can delete an organization.
+                Permanently delete this organization and
+                <strong>all related data</strong>: members, invites, connections, cache policies,
+                proxy credentials, and audit history.
               </CardDescription>
             </CardHeader>
             <CardContent class="flex flex-col gap-4">
               <template v-if="deleteStep === 'warn'">
-                <label class="flex items-start gap-3 text-sm leading-snug">
-                  <Checkbox
-                    :model-value="deleteAck"
-                    class="mt-0.5"
-                    @update:model-value="(v: boolean | 'indeterminate') => deleteAck = v === true"
-                  />
-                  <span>
-                    I understand that all organization data will be permanently lost and cannot be recovered.
-                  </span>
+                <label class="flex items-start gap-2 text-sm">
+                  <Checkbox v-model="deleteAck" class="mt-0.5" />
+                  <span>I understand this cannot be undone and all data will be lost.</span>
                 </label>
-                <div>
-                  <Button
-                    variant="destructive"
-                    :disabled="deleteBusy || !deleteAck"
-                    @click="sendDeleteCode"
-                  >
-                    <Spinner v-if="deleteBusy" data-icon="inline-start" />
-                    {{ deleteBusy ? 'Sending…' : 'Send verification code to my email' }}
-                  </Button>
-                  <p class="mt-2 text-xs text-muted-foreground">
-                    We will email a 6-digit code to your account address. Enter it on the next step to confirm deletion.
-                  </p>
-                </div>
+                <Button variant="destructive" :disabled="deleteBusy || !deleteAck" @click="sendDeleteCode">
+                  <Spinner v-if="deleteBusy" data-icon="inline-start" />
+                  Send verification code
+                </Button>
               </template>
-
               <template v-else>
-                <Alert>
-                  <AlertTitle>Check your email</AlertTitle>
-                  <AlertDescription>
-                    Enter the verification code below to delete this organization forever
-                    (also in control plane logs in dev).
-                  </AlertDescription>
-                </Alert>
-                <Field>
-                  <FieldLabel>Verification code</FieldLabel>
-                  <Input
-                    v-model="deleteCode"
-                    type="text"
-                    inputmode="numeric"
-                    autocomplete="one-time-code"
-                    placeholder="123456"
-                    class="font-mono tracking-widest"
-                    :disabled="deleteBusy"
-                  />
+                <Field class="gap-1.5 max-w-xs">
+                  <FieldLabel>Email verification code</FieldLabel>
+                  <Input v-model="deleteCode" placeholder="6-digit code" :disabled="deleteBusy" />
                 </Field>
                 <div class="flex flex-wrap gap-2">
-                  <Button
-                    variant="outline"
-                    :disabled="deleteBusy"
-                    @click="deleteStep = 'warn'; deleteCode = ''"
-                  >
-                    Back
-                  </Button>
-                  <Button
-                    variant="destructive"
-                    :disabled="deleteBusy || !deleteCode.trim()"
-                    @click="confirmDeleteOrg"
-                  >
+                  <Button variant="destructive" :disabled="deleteBusy" @click="confirmDeleteOrg">
                     <Spinner v-if="deleteBusy" data-icon="inline-start" />
-                    <Trash2Icon v-else data-icon="inline-start" />
-                    {{ deleteBusy ? 'Deleting…' : 'Permanently delete organization' }}
+                    Confirm permanent delete
+                  </Button>
+                  <Button variant="ghost" :disabled="deleteBusy" @click="deleteStep = 'warn'; deleteCode = ''">
+                    Back
                   </Button>
                 </div>
               </template>

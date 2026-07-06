@@ -90,13 +90,16 @@ type Token struct {
 
 // Connection is a named source MongoDB URI for an organization (ciphertext never JSON-exported).
 type Connection struct {
-	ID              string     `json:"id"`
-	TenantID        string     `json:"tenantId"`
-	Name            string     `json:"name"`
-	URICiphertext   []byte     `json:"-"`
-	Nonce           []byte     `json:"-"`
-	DEKVersion      string     `json:"-"`
-	LastValidatedAt *time.Time `json:"lastValidatedAt,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID            string `json:"id"`
+	TenantID      string `json:"tenantId"`
+	Name          string `json:"name"`
+	URICiphertext []byte `json:"-"`
+	Nonce         []byte `json:"-"`
+	DEKVersion    string `json:"-"`
+	// AutoInvalidateOnWrite flushes proxy cache for a collection after successful writes to it.
+	// Default false — TTL + manual invalidate only.
+	AutoInvalidateOnWrite bool       `json:"autoInvalidateOnWrite"`
+	LastValidatedAt       *time.Time `json:"lastValidatedAt,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
 }

@@ -92,12 +92,13 @@ func publicConnection(c *model.Connection) *model.Connection {
 		return nil
 	}
 	return &model.Connection{
-		ID:              c.ID,
-		TenantID:        c.TenantID,
-		Name:            c.Name,
-		LastValidatedAt: c.LastValidatedAt,
-		CreatedAt:       c.CreatedAt,
-		UpdatedAt:       c.UpdatedAt,
+		ID:                    c.ID,
+		TenantID:              c.TenantID,
+		Name:                  c.Name,
+		AutoInvalidateOnWrite: c.AutoInvalidateOnWrite,
+		LastValidatedAt:       c.LastValidatedAt,
+		CreatedAt:             c.CreatedAt,
+		UpdatedAt:             c.UpdatedAt,
 	}
 }
 
@@ -222,6 +223,27 @@ func (s *ConnectionService) Rename(ctx context.Context, tenantID, connectionID, 
 		return err
 	}
 	_ = s.store.RecordAudit(ctx, tenantID, "system", "rename_connection", map[string]string{"connection_id": connectionID, "name": name})
+	return nil
+}
+
+// SetAutoInvalidateOnWrite enables or disables flushing collection cache after writes.
+func (s *ConnectionService) SetAutoInvalidateOnWrite(ctx context.Context, tenantID, connectionID string, enabled bool) error {
+	c, err := s.store.GetConnection(ctx, connectionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrConnectionNotFound
+		}
+		return err
+	}
+	if c.TenantID != tenantID {
+		return ErrConnectionNotFound
+	}
+	if err := s.store.UpdateConnectionAutoInvalidate(ctx, connectionID, enabled); err != nil {
+		return err
+	}
+	_ = s.store.RecordAudit(ctx, tenantID, "system", "set_auto_invalidate_on_write", map[string]any{
+		"connection_id": connectionID, "enabled": enabled,
+	})
 	return nil
 }
 

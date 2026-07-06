@@ -171,7 +171,11 @@ export function useAcceleratorApi() {
     })
   }
 
-  async function updateConnection(tenantId: string, connectionId: string, body: { name?: string, uri?: string }) {
+  async function updateConnection(
+    tenantId: string,
+    connectionId: string,
+    body: { name?: string, uri?: string, autoInvalidateOnWrite?: boolean },
+  ) {
     return $fetch<Connection>(
       `/api/tenants/${encodeURIComponent(tenantId)}/connections/${encodeURIComponent(connectionId)}`,
       { method: 'PUT', headers: authHeaders(), body },

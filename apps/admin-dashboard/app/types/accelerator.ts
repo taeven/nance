@@ -91,6 +91,8 @@ export interface Connection {
   id: string
   tenantId: string
   name: string
+  /** When true, proxy flushes cache for a collection after successful writes to it. Default false. */
+  autoInvalidateOnWrite?: boolean
   lastValidatedAt?: string | null
   created_at: string
   updated_at: string

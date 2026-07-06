@@ -629,15 +629,16 @@ func (h *Handlers) UpdateConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Name *string `json:"name"`
-		URI  *string `json:"uri"`
+		Name                  *string `json:"name"`
+		URI                   *string `json:"uri"`
+		AutoInvalidateOnWrite *bool   `json:"autoInvalidateOnWrite"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if req.Name == nil && req.URI == nil {
-		writeError(w, http.StatusBadRequest, "name or uri required")
+	if req.Name == nil && req.URI == nil && req.AutoInvalidateOnWrite == nil {
+		writeError(w, http.StatusBadRequest, "name, uri, or autoInvalidateOnWrite required")
 		return
 	}
 	if req.Name != nil {
@@ -656,6 +657,16 @@ func (h *Handlers) UpdateConnection(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.URI != nil {
 		if err := h.connections.UpdateURI(r.Context(), tenantID, connectionID, *req.URI); err != nil {
+			if errors.Is(err, service.ErrConnectionNotFound) {
+				writeError(w, http.StatusNotFound, "connection not found")
+				return
+			}
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if req.AutoInvalidateOnWrite != nil {
+		if err := h.connections.SetAutoInvalidateOnWrite(r.Context(), tenantID, connectionID, *req.AutoInvalidateOnWrite); err != nil {
 			if errors.Is(err, service.ErrConnectionNotFound) {
 				writeError(w, http.StatusNotFound, "connection not found")
 				return

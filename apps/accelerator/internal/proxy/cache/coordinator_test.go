@@ -17,12 +17,12 @@ func TestMemoryStore_RoundTripAndInvalidate(t *testing.T) {
 	if err := s.Set(ctx, key, []byte("hello"), time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	_ = s.RegisterKey(ctx, "t", "db", "coll", key)
+	_ = s.RegisterKey(ctx, "t", "conn1", "db", "coll", key)
 	got, err := s.Get(ctx, key)
 	if err != nil || string(got) != "hello" {
 		t.Fatalf("get: %v %q", err, got)
 	}
-	if err := s.InvalidateNamespace(ctx, "t", "db", "coll"); err != nil {
+	if err := s.InvalidateNamespace(ctx, "t", "conn1", "db", "coll"); err != nil {
 		t.Fatal(err)
 	}
 	_, err = s.Get(ctx, key)
