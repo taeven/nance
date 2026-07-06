@@ -20,12 +20,18 @@ import (
 	"github.com/taeven/nance/accelerator/internal/controlplane/service"
 	"github.com/taeven/nance/accelerator/internal/controlplane/store"
 	"github.com/taeven/nance/accelerator/internal/crypto"
+	"github.com/taeven/nance/accelerator/internal/dotenv"
 	"github.com/taeven/nance/accelerator/internal/proxy/cache"
 )
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
+
+	// Optional local .env / .env.local (cwd). Existing process env wins.
+	if err := dotenv.Load(); err != nil {
+		logger.Warn("dotenv load failed", "error", err)
+	}
 
 	cfg := config.Load()
 

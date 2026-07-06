@@ -13,6 +13,7 @@ import (
 	"github.com/taeven/nance/accelerator/internal/controlplane/store"
 	"github.com/taeven/nance/accelerator/internal/crypto"
 	"github.com/taeven/nance/accelerator/internal/model"
+	"go.mongodb.org/mongo-driver/bson"
 
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -272,7 +273,7 @@ func (s *ConnectionService) Test(ctx context.Context, tenantID, connectionID str
 		return fmt.Errorf("ping failed: %w", err)
 	}
 
-	if _, err := client.ListDatabases(ctx, nil); err != nil {
+	if _, err := client.ListDatabases(ctx, bson.D{}); err != nil {
 		return fmt.Errorf("listDatabases failed: %w", err)
 	}
 

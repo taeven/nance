@@ -109,6 +109,8 @@ Set `NANCE_PROXY_PUBLIC_ENDPOINT` on the control plane so issued URIs use your r
 
 ## Important environment variables
 
+Both **control plane** and **proxy** load optional `.env` then `.env.local` from the **process working directory** at startup (missing files are ignored). Variables already set in the shell/container always win.
+
 ### Control plane (`cmd/controlplane`)
 
 | Variable | Default | Purpose |
