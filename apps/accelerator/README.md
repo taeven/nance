@@ -193,6 +193,10 @@ Base path: **`/api/v1`**. Health: `/healthz`, `/readyz`, `/metrics`.
 make build-all
 make test
 make lint   # if configured
+
+# Live proxy caching against compose Mongo + Redis (starts proxy in-process):
+make dev-up
+make test-integration
 ```
 
 ## Docker / K8s

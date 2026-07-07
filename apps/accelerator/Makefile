@@ -65,8 +65,10 @@ seed:
 test:
 	go test ./...
 
+# Live proxy + cache test against localhost Mongo (:27017) and Redis (:6379).
+# Requires: make dev-up (mongo + redis). Starts an ephemeral proxy in-process.
 test-integration:
-	go test -tags=integration -count=1 ./...
+	go test -tags=integration -count=1 ./internal/proxy/integrationtest/ -v -timeout 2m
 
 lint:
 	go vet ./...

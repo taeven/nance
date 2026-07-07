@@ -296,12 +296,18 @@ func (h *Handler) handlePassthrough(ctx context.Context, cs *ConnState, msg *wir
 	} else if cmdLower == "aggregate" {
 		reply, err = h.handleAggregate(ctx, cs, client, dbName, cmdDoc, info)
 	} else {
-		// Default: RunCommand passthrough
+		// Default: RunCommand passthrough. Modern drivers always attach lsid; the pool's
+		// mongo.Client manages its own sessions — forwarding wire lsid causes
+		// "duplicate field lsid" on the backend.
+		runCmd := cmdDoc
+		if !info.IsTxn {
+			runCmd = stripSessionFields(cmdDoc)
+		}
 		runCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
 
 		var result bson.M
-		err = client.Database(dbName).RunCommand(runCtx, cmdDoc).Decode(&result)
+		err = client.Database(dbName).RunCommand(runCtx, runCmd).Decode(&result)
 		if err != nil {
 			telemetry.ProxyBackendErrors.WithLabelValues(tenantID).Inc()
 			return command.MongoErrorToReply(err), nil
@@ -691,8 +697,9 @@ func (h *Handler) handleFind(ctx context.Context, cs *ConnState, client *mongo.C
 		// handled after first batch
 	}
 
-	// Pass through lsid/txn via RunCommand if in a transaction — fall back to RunCommand
-	if info.IsTxn || hasSessionFields(cmd) {
+	// Only multi-doc transactions need wire session fields forwarded. Otherwise use
+	// the collection helper (backend client owns the session).
+	if info.IsTxn {
 		return h.runCommandRaw(ctx, cs, client, dbName, cmd, info)
 	}
 
@@ -718,7 +725,7 @@ func (h *Handler) handleAggregate(ctx context.Context, cs *ConnState, client *mo
 		pipeline = bson.A{}
 	}
 
-	if info.IsTxn || hasSessionFields(cmd) {
+	if info.IsTxn {
 		return h.runCommandRaw(ctx, cs, client, dbName, cmd, info)
 	}
 
@@ -765,8 +772,12 @@ func (h *Handler) runCommandRaw(ctx context.Context, cs *ConnState, client *mong
 	runCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
+	runCmd := cmd
+	if !info.IsTxn {
+		runCmd = stripSessionFields(cmd)
+	}
 	var result bson.M
-	err := client.Database(dbName).RunCommand(runCtx, cmd).Decode(&result)
+	err := client.Database(dbName).RunCommand(runCtx, runCmd).Decode(&result)
 	if err != nil {
 		telemetry.ProxyBackendErrors.WithLabelValues(tenantID).Inc()
 		return command.MongoErrorToReply(err), nil
@@ -1013,6 +1024,21 @@ func hasSessionFields(cmd bson.D) bool {
 		}
 	}
 	return false
+}
+
+// stripSessionFields removes wire-level session fields so the backend mongo.Client
+// can attach its own session without "duplicate field lsid" errors.
+func stripSessionFields(cmd bson.D) bson.D {
+	out := make(bson.D, 0, len(cmd))
+	for _, e := range cmd {
+		switch e.Key {
+		case "lsid", "txnNumber", "autocommit", "startTransaction":
+			continue
+		default:
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 func mapToD(m bson.M) bson.D {
