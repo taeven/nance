@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -20,6 +21,10 @@ type Config struct {
 	// ProxyPublicEndpoint is host[:port] used when building client proxy
 	// connection URIs (e.g. "127.0.0.1:27018" or "proxy.example.com:27018").
 	ProxyPublicEndpoint string
+
+	// TokenReenableWindow is how long after revoke a proxy token may be re-enabled.
+	// Default 5m. Set NANCE_TOKEN_REENABLE_WINDOW=0 to disable.
+	TokenReenableWindow time.Duration
 }
 
 func Load() *Config {
@@ -51,6 +56,7 @@ func Load() *Config {
 		MigrationDir:        migrations,
 		InviteOnly:          envBool("NANCE_INVITE_ONLY", false),
 		ProxyPublicEndpoint: proxyEndpoint,
+		TokenReenableWindow: envDurationAllowZero("NANCE_TOKEN_REENABLE_WINDOW", 5*time.Minute),
 	}
 }
 
@@ -66,19 +72,29 @@ type PlatformPublic struct {
 	AllowAdminBootstrap bool `json:"allowAdminBootstrap"`
 	// ProxyPublicEndpoint is host[:port] for building client proxy connection URIs.
 	ProxyPublicEndpoint string `json:"proxyPublicEndpoint"`
+	// TokenReenableWindowSeconds is the grace period to re-enable a revoked proxy token (0 = disabled).
+	TokenReenableWindowSeconds int `json:"tokenReenableWindowSeconds"`
 }
 
 func (c *Config) PlatformPublic() PlatformPublic {
 	inviteOnly := c != nil && c.InviteOnly
 	endpoint := "127.0.0.1:27018"
-	if c != nil && c.ProxyPublicEndpoint != "" {
-		endpoint = c.ProxyPublicEndpoint
+	window := 5 * time.Minute
+	if c != nil {
+		if c.ProxyPublicEndpoint != "" {
+			endpoint = c.ProxyPublicEndpoint
+		}
+		window = c.TokenReenableWindow
+		if window < 0 {
+			window = 0
+		}
 	}
 	return PlatformPublic{
-		InviteOnly:          inviteOnly,
-		AllowOrgCreation:    !inviteOnly,
-		AllowAdminBootstrap: true,
-		ProxyPublicEndpoint: endpoint,
+		InviteOnly:                 inviteOnly,
+		AllowOrgCreation:           !inviteOnly,
+		AllowAdminBootstrap:        true,
+		ProxyPublicEndpoint:        endpoint,
+		TokenReenableWindowSeconds: int(window / time.Second),
 	}
 }
 
@@ -95,4 +111,23 @@ func envBool(key string, def bool) bool {
 	default:
 		return def
 	}
+}
+
+// envDurationAllowZero treats missing env as def, but explicit "0" as zero (disable feature).
+func envDurationAllowZero(key string, def time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	if v == "0" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return def
+	}
+	if d < 0 {
+		return 0
+	}
+	return d
 }

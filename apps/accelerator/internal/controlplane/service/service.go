@@ -22,11 +22,14 @@ import (
 )
 
 var (
-	ErrTenantNotFound     = errors.New("tenant not found")
-	ErrConnectionNotFound = errors.New("connection not found")
-	ErrDuplicateName      = errors.New("connection name already exists")
-	ErrInvalidToken       = errors.New("invalid token")
-	ErrPolicyNotFound     = errors.New("policy not found")
+	ErrTenantNotFound        = errors.New("tenant not found")
+	ErrConnectionNotFound    = errors.New("connection not found")
+	ErrDuplicateName         = errors.New("connection name already exists")
+	ErrInvalidToken          = errors.New("invalid token")
+	ErrPolicyNotFound        = errors.New("policy not found")
+	ErrTokenNotRevoked       = errors.New("token is not revoked")
+	ErrReenableDisabled      = errors.New("token re-enable is disabled")
+	ErrReenableWindowExpired = errors.New("re-enable window has expired")
 )
 
 // TenantService handles tenant lifecycle.
@@ -440,10 +443,16 @@ func (s *PolicyService) Invalidate(ctx context.Context, tenantID, connectionID, 
 type TokenService struct {
 	store               store.Store
 	proxyPublicEndpoint string
+	// reenableWindow is how long after revoke a token may be re-enabled (0 = disabled).
+	reenableWindow time.Duration
 }
 
 func NewTokenService(s store.Store) *TokenService {
-	return &TokenService{store: s, proxyPublicEndpoint: "127.0.0.1:27018"}
+	return &TokenService{
+		store:               s,
+		proxyPublicEndpoint: "127.0.0.1:27018",
+		reenableWindow:      5 * time.Minute,
+	}
 }
 
 // WithProxyPublicEndpoint sets the host[:port] used in issued proxy connection URIs.
@@ -453,6 +462,21 @@ func (s *TokenService) WithProxyPublicEndpoint(endpoint string) *TokenService {
 		s.proxyPublicEndpoint = endpoint
 	}
 	return s
+}
+
+// WithReenableWindow sets how long after revoke a token may be re-enabled.
+// Zero disables re-enable. Negative values are treated as zero.
+func (s *TokenService) WithReenableWindow(d time.Duration) *TokenService {
+	if d < 0 {
+		d = 0
+	}
+	s.reenableWindow = d
+	return s
+}
+
+// ReenableWindow returns the configured re-enable grace period.
+func (s *TokenService) ReenableWindow() time.Duration {
+	return s.reenableWindow
 }
 
 // IssuedAccess is returned once when creating proxy access for a connection.
@@ -551,11 +575,21 @@ func (s *TokenService) ListForConnection(ctx context.Context, tenantID, connecti
 	if c.TenantID != tenantID {
 		return nil, ErrConnectionNotFound
 	}
-	return s.store.ListTokensForConnection(ctx, connectionID)
+	list, err := s.store.ListTokensForConnection(ctx, connectionID)
+	if err != nil {
+		return nil, err
+	}
+	s.annotateReenable(list)
+	return list, nil
 }
 
 func (s *TokenService) List(ctx context.Context, tenantID string) ([]*model.Token, error) {
-	return s.store.ListTokensForTenant(ctx, tenantID)
+	list, err := s.store.ListTokensForTenant(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	s.annotateReenable(list)
+	return list, nil
 }
 
 func (s *TokenService) Get(ctx context.Context, tokenID string) (*model.Token, error) {
@@ -566,9 +600,59 @@ func (s *TokenService) Get(ctx context.Context, tokenID string) (*model.Token, e
 		}
 		return nil, err
 	}
+	s.annotateReenable([]*model.Token{tok})
 	return tok, nil
 }
 
 func (s *TokenService) Revoke(ctx context.Context, tokenID string) error {
 	return s.store.RevokeToken(ctx, tokenID)
+}
+
+// Reenable clears revocation if the token is still within the re-enable window.
+func (s *TokenService) Reenable(ctx context.Context, tokenID string) (*model.Token, error) {
+	if s.reenableWindow <= 0 {
+		return nil, ErrReenableDisabled
+	}
+	tok, err := s.store.GetTokenByID(ctx, tokenID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, ErrInvalidToken
+		}
+		return nil, err
+	}
+	if tok.RevokedAt == nil {
+		return nil, ErrTokenNotRevoked
+	}
+	deadline := tok.RevokedAt.Add(s.reenableWindow)
+	if time.Now().UTC().After(deadline) {
+		return nil, ErrReenableWindowExpired
+	}
+	if err := s.store.ClearTokenRevocation(ctx, tokenID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, ErrTokenNotRevoked
+		}
+		return nil, err
+	}
+	_ = s.store.RecordAudit(ctx, tok.TenantID, "system", "reenable_token", map[string]string{
+		"token_id": tokenID, "connection_id": tok.ConnectionID,
+	})
+	return s.Get(ctx, tokenID)
+}
+
+// annotateReenable sets ReenableUntil on revoked tokens still inside the grace window.
+func (s *TokenService) annotateReenable(list []*model.Token) {
+	if s.reenableWindow <= 0 || len(list) == 0 {
+		return
+	}
+	now := time.Now().UTC()
+	for _, t := range list {
+		if t == nil || t.RevokedAt == nil {
+			continue
+		}
+		until := t.RevokedAt.UTC().Add(s.reenableWindow)
+		if !now.After(until) {
+			u := until
+			t.ReenableUntil = &u
+		}
+	}
 }

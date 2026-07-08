@@ -87,6 +87,9 @@ type Token struct {
 	CreatedAt    time.Time  `json:"created_at"`
 	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
 	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
+	// ReenableUntil is computed at read time when the token is revoked and still within
+	// the configured re-enable window (NANCE_TOKEN_REENABLE_WINDOW). Not stored.
+	ReenableUntil *time.Time `json:"reenableUntil,omitempty"`
 }
 
 // Connection is a named source MongoDB URI for an organization (ciphertext never JSON-exported).

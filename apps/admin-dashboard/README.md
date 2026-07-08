@@ -16,7 +16,7 @@ Operators and team members sign in with **email + one-time code**, manage **orga
 | **Organizations** | List memberships, create (unless invite-only), accept invites |
 | **Roles** | **member** read-only · **admin** manage settings · **owner** + delete org |
 | **Members** | Invite by email (role limits by inviter), revoke invites, remove members |
-| **Connections** | Multiple named source Mongo URIs per org; test; **create proxy access** per connection (URI shown once); list/revoke credentials |
+| **Connections** | Multiple named source Mongo URIs per org; test; **create proxy access** per connection (URI shown once); list/revoke credentials; **re-enable** revoked tokens within the control-plane grace window |
 | **Caching** | Per **connection**: default **60s** TTL for `*_cache` queries; optional per-collection overrides; manual invalidate |
 | **Invalidate** | Explicit cache flush by real db/collection/tags (admin+) |
 | **Danger zone** | Owners only: delete org with email verification code |

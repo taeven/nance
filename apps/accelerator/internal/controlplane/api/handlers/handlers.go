@@ -19,6 +19,8 @@ type PlatformPublic struct {
 	AllowOrgCreation    bool   `json:"allowOrgCreation"`
 	AllowAdminBootstrap bool   `json:"allowAdminBootstrap"`
 	ProxyPublicEndpoint string `json:"proxyPublicEndpoint"`
+	// TokenReenableWindowSeconds is how long after revoke a token may be re-enabled (0 = disabled).
+	TokenReenableWindowSeconds int `json:"tokenReenableWindowSeconds"`
 }
 
 type Handlers struct {
@@ -911,4 +913,34 @@ func (h *Handlers) RevokeToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+}
+
+func (h *Handlers) ReenableToken(w http.ResponseWriter, r *http.Request) {
+	tokenID := chi.URLParam(r, "tokenId")
+	tok, err := h.tokens.Get(r.Context(), tokenID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "token not found")
+		return
+	}
+	if err := h.ensureTenantAdmin(r, tok.TenantID); err != nil {
+		mapAuthErr(w, err)
+		return
+	}
+	updated, err := h.tokens.Reenable(r.Context(), tokenID)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrReenableDisabled):
+			writeError(w, http.StatusForbidden, err.Error())
+		case errors.Is(err, service.ErrReenableWindowExpired):
+			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, service.ErrTokenNotRevoked):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, service.ErrInvalidToken):
+			writeError(w, http.StatusNotFound, "token not found")
+		default:
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }

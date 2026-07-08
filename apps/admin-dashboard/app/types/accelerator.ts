@@ -74,6 +74,8 @@ export interface Token {
   created_at: string
   expires_at?: string | null
   revoked_at?: string | null
+  /** Present when revoked and still within the re-enable grace window. */
+  reenableUntil?: string | null
 }
 
 export interface IssueTokenResponse {
@@ -130,4 +132,6 @@ export interface PlatformSettings {
   allowAdminBootstrap: boolean
   /** host[:port] for building client proxy connection URIs */
   proxyPublicEndpoint?: string
+  /** Grace period (seconds) to re-enable a revoked proxy token; 0 = disabled. */
+  tokenReenableWindowSeconds?: number
 }

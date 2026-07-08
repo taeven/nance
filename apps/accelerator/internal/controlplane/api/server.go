@@ -86,6 +86,7 @@ func NewServer(
 				r.Get("/tenants/{tenantId}/connections/{connectionId}/tokens", h.ListTokens)
 				r.Post("/tenants/{tenantId}/connections/{connectionId}/tokens", h.IssueToken)
 				r.Delete("/tokens/{tokenId}", h.RevokeToken)
+				r.Post("/tokens/{tokenId}/reenable", h.ReenableToken)
 
 				// Cache policy + invalidate (per connection)
 				r.Get("/tenants/{tenantId}/connections/{connectionId}/policy", h.GetPolicy)

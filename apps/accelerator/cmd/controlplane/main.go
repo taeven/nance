@@ -76,7 +76,9 @@ func main() {
 			logger.Warn("redis unavailable for control plane invalidation", "error", err)
 		}
 	}
-	tokenSvc := service.NewTokenService(pgStore).WithProxyPublicEndpoint(cfg.ProxyPublicEndpoint)
+	tokenSvc := service.NewTokenService(pgStore).
+		WithProxyPublicEndpoint(cfg.ProxyPublicEndpoint).
+		WithReenableWindow(cfg.TokenReenableWindow)
 	mailer := &service.LogMailer{Log: logger}
 	authSvc := service.NewAuthService(pgStore, mailer, logger)
 	orgSvc := service.NewOrgService(pgStore, mailer).WithInviteOnly(cfg.InviteOnly)
@@ -87,10 +89,11 @@ func main() {
 	// 5. HTTP server
 	pub := cfg.PlatformPublic()
 	handler := api.NewServer(tenantSvc, connectionSvc, policySvc, tokenSvc, authSvc, orgSvc, handlers.PlatformPublic{
-		InviteOnly:          pub.InviteOnly,
-		AllowOrgCreation:    pub.AllowOrgCreation,
-		AllowAdminBootstrap: pub.AllowAdminBootstrap,
-		ProxyPublicEndpoint: pub.ProxyPublicEndpoint,
+		InviteOnly:                 pub.InviteOnly,
+		AllowOrgCreation:           pub.AllowOrgCreation,
+		AllowAdminBootstrap:        pub.AllowAdminBootstrap,
+		ProxyPublicEndpoint:        pub.ProxyPublicEndpoint,
+		TokenReenableWindowSeconds: pub.TokenReenableWindowSeconds,
 	})
 
 	srv := &http.Server{
@@ -117,6 +120,7 @@ func main() {
 	logger.Info("control plane starting",
 		"addr", cfg.Port,
 		"proxyPublicEndpoint", cfg.ProxyPublicEndpoint,
+		"tokenReenableWindow", cfg.TokenReenableWindow.String(),
 	)
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Error("server error", "error", err)

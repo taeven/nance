@@ -57,6 +57,8 @@ type Store interface {
 	// ListActiveTokenHashes returns id+hash+connection for non-revoked, non-expired tokens of a tenant (proxy auth).
 	ListActiveTokenHashes(ctx context.Context, tenantID string) ([]TokenHashRow, error)
 	RevokeToken(ctx context.Context, id string) error
+	// ClearTokenRevocation clears revoked_at so the token is active again (re-enable within grace window).
+	ClearTokenRevocation(ctx context.Context, id string) error
 
 	// Users / sessions / email OTP
 	UpsertUserByEmail(ctx context.Context, email, name string) (*model.User, error)
@@ -517,6 +519,17 @@ func (s *PostgresStore) ListActiveTokenHashes(ctx context.Context, tenantID stri
 func (s *PostgresStore) RevokeToken(ctx context.Context, id string) error {
 	_, err := s.pool.Exec(ctx, `UPDATE tokens SET revoked_at = NOW() WHERE id = $1`, id)
 	return err
+}
+
+func (s *PostgresStore) ClearTokenRevocation(ctx context.Context, id string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE tokens SET revoked_at = NULL WHERE id = $1 AND revoked_at IS NOT NULL`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ===== Audit =====

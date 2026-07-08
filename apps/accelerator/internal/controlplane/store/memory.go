@@ -365,6 +365,17 @@ func (m *MemoryStore) RevokeToken(_ context.Context, id string) error {
 	return nil
 }
 
+func (m *MemoryStore) ClearTokenRevocation(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	row, ok := m.tokens[id]
+	if !ok || row.tok.RevokedAt == nil {
+		return ErrNotFound
+	}
+	row.tok.RevokedAt = nil
+	return nil
+}
+
 func (m *MemoryStore) UpsertUserByEmail(_ context.Context, email, name string) (*model.User, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	m.mu.Lock()

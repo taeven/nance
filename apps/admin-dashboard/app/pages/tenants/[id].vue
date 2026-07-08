@@ -575,6 +575,23 @@ async function revokeToken() {
   }
 }
 
+function canReenableToken(tok: Token): boolean {
+  if (!tok.revoked_at || !tok.reenableUntil) return false
+  return new Date(tok.reenableUntil).getTime() > Date.now()
+}
+
+async function reenableToken(tokenId: string) {
+  try {
+    await api.reenableToken(tokenId)
+    await loadTokens()
+    toast.success('Proxy access re-enabled')
+  }
+  catch (e) {
+    toast.error(api.apiErrorMessage(e))
+    await loadTokens()
+  }
+}
+
 function copyText(text: string) {
   navigator.clipboard?.writeText(text).then(() => toast.message('Copied to clipboard'))
 }
@@ -980,6 +997,7 @@ async function confirmDeleteOrg() {
                         <CardTitle class="text-base">Active credentials</CardTitle>
                         <CardDescription>
                           Each row is one proxy secret for this connection. Secrets cannot be shown again after creation.
+                          Revoked credentials can be re-enabled for a short grace period (default 5 minutes).
                         </CardDescription>
                       </CardHeader>
                       <Empty v-if="!tokens.length" class="py-10">
@@ -1014,15 +1032,25 @@ async function confirmDeleteOrg() {
                               <Badge v-if="tok.revoked_at" variant="destructive">revoked</Badge>
                               <Badge v-else>active</Badge>
                             </TableCell>
-                            <TableCell>
-                              <Button
-                                v-if="!tok.revoked_at && canManage"
-                                variant="destructive"
-                                size="sm"
-                                @click="confirmRevoke(tok.id)"
-                              >
-                                Revoke
-                              </Button>
+                            <TableCell class="text-right">
+                              <div class="flex flex-wrap justify-end gap-1.5">
+                                <Button
+                                  v-if="!tok.revoked_at && canManage"
+                                  variant="destructive"
+                                  size="sm"
+                                  @click="confirmRevoke(tok.id)"
+                                >
+                                  Revoke
+                                </Button>
+                                <Button
+                                  v-else-if="canManage && canReenableToken(tok)"
+                                  variant="outline"
+                                  size="sm"
+                                  @click="reenableToken(tok.id)"
+                                >
+                                  Re-enable
+                                </Button>
+                              </div>
                             </TableCell>
                           </TableRow>
                         </TableBody>

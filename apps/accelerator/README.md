@@ -121,6 +121,7 @@ Both **control plane** and **proxy** load optional `.env` then `.env.local` from
 | `NANCE_INVITE_ONLY` | `false` | Users cannot create orgs; join via invite only |
 | `NANCE_REQUIRE_USER_AUTH` | unset | If `1`, require session/admin token even when admin token is empty |
 | `NANCE_PROXY_PUBLIC_ENDPOINT` | `127.0.0.1:27018` | Host[:port] embedded in issued `proxyConnectionUri` values and `GET /platform` |
+| `NANCE_TOKEN_REENABLE_WINDOW` | `5m` | How long after revoke a proxy token may be re-enabled (`0` disables; Go duration, e.g. `5m`, `1h`) |
 | `PORT` | `8080` | HTTP listen (host uses `PORT`; bind is `:`+port) |
 | `MIGRATIONS_DIR` | `./migrations` | SQL migrations |
 | `NANCE_REDIS_ADDR` | | Redis `host:port` **or** full URL `redis://user:pass@host:port` / `rediss://…` (TLS) |
@@ -153,7 +154,7 @@ Base path: **`/api/v1`**. Health: `/healthz`, `/readyz`, `/metrics`.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/platform` | `{ inviteOnly, allowOrgCreation, allowAdminBootstrap, proxyPublicEndpoint }` |
+| `GET` | `/platform` | `{ inviteOnly, allowOrgCreation, allowAdminBootstrap, proxyPublicEndpoint, tokenReenableWindowSeconds }` |
 | `POST` | `/auth/request-code` | `{ "email" }` — send OTP (dev: log mailer) |
 | `POST` | `/auth/verify` | `{ "email", "code" }` → `{ token, user }` |
 
@@ -179,6 +180,7 @@ Base path: **`/api/v1`**. Health: `/healthz`, `/readyz`, `/metrics`.
 | `POST` | `/tenants/{id}/connections/{connectionId}/test` | Connectivity test |
 | `GET` / `POST` | `/tenants/{id}/connections/{connectionId}/tokens` | List / create proxy access (returns `proxyConnectionUri` once) |
 | `DELETE` | `/tokens/{tokenId}` | Revoke proxy access |
+| `POST` | `/tokens/{tokenId}/reenable` | Re-enable a revoked token within `NANCE_TOKEN_REENABLE_WINDOW` |
 | `GET` | `/tenants/{id}/connections/{connectionId}/policy` | Cache policy for this connection |
 | `PUT` | `/tenants/{id}/connections/{connectionId}/policy/defaults` | `{ "defaultTtlSeconds" }` |
 | `PUT` | `/tenants/{id}/connections/{connectionId}/policy/collections/{db.coll}` | Per-collection TTL override |

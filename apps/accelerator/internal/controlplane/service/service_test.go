@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/taeven/nance/accelerator/internal/controlplane/store"
 	"github.com/taeven/nance/accelerator/internal/model"
@@ -114,6 +116,87 @@ func TestConnectionAndTokenService(t *testing.T) {
 	got, _ := ms.GetTokenByID(ctx, issued.Token.ID)
 	if got.RevokedAt == nil {
 		t.Fatal("expected revoked")
+	}
+
+	// Within default re-enable window: can re-enable
+	listRevoked, err := svc.ListForConnection(ctx, "t1", "conn_a")
+	if err != nil || len(listRevoked) != 1 {
+		t.Fatalf("%d %v", len(listRevoked), err)
+	}
+	if listRevoked[0].ReenableUntil == nil {
+		t.Fatal("expected reenableUntil while in window")
+	}
+	restored, err := svc.Reenable(ctx, issued.Token.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.RevokedAt != nil {
+		t.Fatal("expected re-enabled (revoked_at cleared)")
+	}
+	active, err := ms.ListActiveTokenHashes(ctx, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, row := range active {
+		if row.ID == issued.Token.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("re-enabled token should be active for proxy auth")
+	}
+}
+
+func TestTokenReenableWindow(t *testing.T) {
+	ctx := context.Background()
+	ms := store.NewMemoryStore()
+	if err := ms.CreateTenant(ctx, &model.Tenant{ID: "t1", Name: "T", Status: "active"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.CreateConnection(ctx, &model.Connection{
+		ID: "conn_a", TenantID: "t1", Name: "prod",
+		URICiphertext: []byte("ct"), Nonce: []byte("n"), DEKVersion: "v1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Disabled window
+	svcOff := NewTokenService(ms).WithReenableWindow(0)
+	issued, err := svcOff.Issue(ctx, "t1", "conn_a", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svcOff.Revoke(ctx, issued.Token.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svcOff.Reenable(ctx, issued.Token.ID); !errors.Is(err, ErrReenableDisabled) {
+		t.Fatalf("want disabled, got %v", err)
+	}
+
+	// Expired window (1ns + sleep)
+	svcTiny := NewTokenService(ms).WithReenableWindow(time.Nanosecond)
+	issued3, err := svcTiny.Issue(ctx, "t1", "conn_a", "z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svcTiny.Revoke(ctx, issued3.Token.ID); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	if _, err := svcTiny.Reenable(ctx, issued3.Token.ID); !errors.Is(err, ErrReenableWindowExpired) {
+		t.Fatalf("want window expired, got %v", err)
+	}
+
+	// Not revoked
+	svc := NewTokenService(ms).WithReenableWindow(time.Minute)
+	issued4, err := svc.Issue(ctx, "t1", "conn_a", "active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Reenable(ctx, issued4.Token.ID); !errors.Is(err, ErrTokenNotRevoked) {
+		t.Fatalf("want not revoked, got %v", err)
 	}
 }
 

@@ -251,6 +251,13 @@ export function useAcceleratorApi() {
     })
   }
 
+  async function reenableToken(tokenId: string) {
+    return $fetch<Token>(`/api/tokens/${encodeURIComponent(tokenId)}/reenable`, {
+      method: 'POST',
+      headers: authHeaders(),
+    })
+  }
+
   async function invalidate(tenantId: string, connectionId: string, req: InvalidateRequest = {}) {
     return $fetch<InvalidateResponse>(
       `/api/tenants/${encodeURIComponent(tenantId)}/connections/${encodeURIComponent(connectionId)}/invalidate`,
@@ -304,6 +311,7 @@ export function useAcceleratorApi() {
     listTokens,
     issueToken,
     revokeToken,
+    reenableToken,
     invalidate,
     getSavings,
     checkHealth,
