@@ -772,28 +772,43 @@ async function confirmDeleteOrg() {
               </Empty>
 
               <nav v-else class="flex flex-col gap-1" aria-label="Connection list">
-                <button
+                <div
                   v-for="c in connections"
                   :key="c.id"
-                  type="button"
-                  class="flex flex-col gap-1 rounded-lg border px-3 py-2.5 text-left transition-colors"
+                  class="group relative flex items-stretch rounded-lg border transition-colors"
                   :class="!showAddConnection && c.id === selectedConnectionId
                     ? 'border-primary/60 bg-primary/10 shadow-[inset_0_0_0_1px] shadow-primary/20'
                     : 'border-transparent bg-transparent hover:bg-muted/50'"
-                  @click="selectConnection(c.id)"
                 >
-                  <span class="flex items-center justify-between gap-2">
-                    <span class="truncate text-sm font-medium">{{ c.name }}</span>
-                    <Badge
-                      v-if="c.autoInvalidateOnWrite"
-                      variant="outline"
-                      class="shrink-0 text-[10px]"
-                    >
-                      write-flush
-                    </Badge>
-                  </span>
-                  <span class="truncate font-mono text-[10px] text-muted-foreground">{{ c.id }}</span>
-                </button>
+                  <button
+                    type="button"
+                    class="flex min-w-0 flex-1 flex-col gap-1 py-2.5 pl-3 text-left"
+                    :class="canManage ? 'pr-10' : 'pr-3'"
+                    @click="selectConnection(c.id)"
+                  >
+                    <span class="flex items-center justify-between gap-2">
+                      <span class="truncate text-sm font-medium">{{ c.name }}</span>
+                      <Badge
+                        v-if="c.autoInvalidateOnWrite"
+                        variant="outline"
+                        class="shrink-0 text-[10px]"
+                      >
+                        write-flush
+                      </Badge>
+                    </span>
+                    <span class="truncate font-mono text-[10px] text-muted-foreground">{{ c.id }}</span>
+                  </button>
+                  <button
+                    v-if="canManage"
+                    type="button"
+                    class="absolute right-1.5 top-1/2 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded-md text-destructive opacity-0 transition-opacity hover:bg-destructive/10 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive/40 group-hover:opacity-100 group-focus-within:opacity-100"
+                    :aria-label="`Delete ${c.name}`"
+                    :disabled="connectionBusy"
+                    @click.stop="confirmDeleteConnection(c.id)"
+                  >
+                    <Trash2Icon class="size-3.5" />
+                  </button>
+                </div>
               </nav>
             </aside>
 
