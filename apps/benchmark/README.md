@@ -8,6 +8,8 @@ Use it to set throughput/latency baselines and to compare:
 - **Cache** — reads on `db.orders_cache` (proxy Redis path)
 - **Direct Mongo** vs **proxy** (change only `MONGO_URI`)
 
+**Published heavy-load A/B (direct Atlas vs proxy cache):** see [`benchmark_report.md`](./benchmark_report.md).
+
 ## Layout
 
 ```
@@ -17,7 +19,8 @@ apps/benchmark/
   scripts/seed.py            # seed real collection before reads
   requirements.txt
   .env.example
-  results/                   # optional exports / notes
+  benchmark_report.md        # durable heavy-load report (direct vs cache)
+  results/                   # optional Locust CSV/HTML exports
 ```
 
 ## Setup
