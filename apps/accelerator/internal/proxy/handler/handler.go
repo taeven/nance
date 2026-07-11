@@ -16,6 +16,7 @@ import (
 	"github.com/taeven/nance/accelerator/internal/proxy/cachestats"
 	"github.com/taeven/nance/accelerator/internal/proxy/command"
 	"github.com/taeven/nance/accelerator/internal/proxy/cursor"
+	proxymetrics "github.com/taeven/nance/accelerator/internal/proxy/metrics"
 	"github.com/taeven/nance/accelerator/internal/proxy/policy"
 	"github.com/taeven/nance/accelerator/internal/proxy/pool"
 	"github.com/taeven/nance/accelerator/internal/proxy/ratelimit"
@@ -35,7 +36,13 @@ type ConnState struct {
 	Authed      bool
 	RemoteAddr  string
 	AllowUnauth bool
-	connIDGen   *atomic.Int32
+	// TenantCounted is true once this conn is included in authenticated connection gauges / limits.
+	TenantCounted bool
+	// CountedTenantID is the tenant id used for gauges (survives logout clearing Tenant).
+	CountedTenantID string
+	// InFlight is 1 while Handle is processing a message (server-owned busy gauge).
+	InFlight  atomic.Int32
+	connIDGen *atomic.Int32
 }
 
 // Deps bundles handler dependencies.
@@ -46,7 +53,9 @@ type Deps struct {
 	CachedCursors *cachedcursor.Store
 	Cache         *cache.Coordinator
 	CacheStats    *cachestats.Tracker // per-collection hit/miss (in-process, lock-free)
-	Policies      *policy.Engine
+	// MetricsRecorder optional central cache outcome fan-out (Prom + cachestats + savings).
+	MetricsRecorder *proxymetrics.Recorder
+	Policies        *policy.Engine
 	// Store loads connection settings (e.g. auto-invalidate on write). Optional.
 	Store        store.Store
 	Limiter      *ratelimit.Limiter
@@ -79,14 +88,15 @@ func (h *Handler) Handle(ctx context.Context, cs *ConnState, msg *wire.Msg) (any
 	}
 
 	cmdLower := strings.ToLower(info.Name)
+	cmdLabel := proxymetrics.CommandLabel(info.Name)
 	tenantLabel := "unauth"
 	if cs.Tenant != nil {
 		tenantLabel = cs.Tenant.TenantID
 	}
 
 	defer func() {
-		telemetry.ProxyCommands.WithLabelValues(tenantLabel, cmdLower).Inc()
-		telemetry.ProxyCommandDuration.WithLabelValues(cmdLower).Observe(time.Since(start).Seconds())
+		telemetry.ProxyCommands.WithLabelValues(tenantLabel, cmdLabel).Inc()
+		telemetry.ProxyCommandDuration.WithLabelValues(cmdLabel).Observe(time.Since(start).Seconds())
 	}()
 
 	// Pre-auth gate
@@ -357,7 +367,7 @@ func (h *Handler) tryCacheRead(
 		return nil, false
 	}
 	if bypass, reason := cache.ShouldBypassCache(info.Name, msg.Body, info.IsTxn); bypass {
-		telemetry.CacheBypass.WithLabelValues(tenantID, reason).Inc()
+		h.recordCache(tenantID, dbName, collName, nsLabel, cmdLower, proxymetrics.OutcomeBypass, 0, reason)
 		return nil, false
 	}
 	// Policy supplies TTL / max bytes / key version; opt-in is the _cache suffix, not Enabled.
@@ -370,11 +380,12 @@ func (h *Handler) tryCacheRead(
 
 	key, err := cache.CacheKey(tenantID, connectionID, dbName, collName, info.Name, msg.Body, dec.CacheKeyVersion)
 	if err != nil {
-		telemetry.CacheBypass.WithLabelValues(tenantID, "bad_key").Inc()
+		h.recordCache(tenantID, dbName, collName, nsLabel, cmdLower, proxymetrics.OutcomeBypass, 0, "bad_key")
 		return nil, false
 	}
 
 	start := time.Now()
+	var missBytes int
 	payload, hit, err := h.deps.Cache.GetOrLoad(ctx, key, func(ctx context.Context) ([]byte, error) {
 		// Execute backend inside singleflight on miss
 		client, err := h.deps.Pool.Get(ctx, connectionID)
@@ -413,15 +424,13 @@ func (h *Handler) tryCacheRead(
 			return nil, serr
 		}
 		if len(serialized) > dec.MaxResultBytes {
-			telemetry.CacheBypass.WithLabelValues(tenantID, "size").Inc()
+			h.recordCache(tenantID, dbName, collName, nsLabel, cmdLower, proxymetrics.OutcomeBypass, 0, "size")
 			return nil, errTooBig
 		}
 		h.deps.Cache.BestEffortSet(ctx, tenantID, connectionID, dbName, collName, key, serialized, dec.TTL)
-		telemetry.CacheResultBytes.WithLabelValues(tenantID).Observe(float64(len(serialized)))
-		telemetry.CacheMisses.WithLabelValues(tenantID, nsLabel, cmdLower).Inc()
-		if h.deps.CacheStats != nil {
-			h.deps.CacheStats.RecordMiss(tenantID, dbName, collName)
-		}
+		telemetry.CacheResultBytes.Observe(float64(len(serialized)))
+		missBytes = len(serialized)
+		h.recordCache(tenantID, dbName, collName, nsLabel, cmdLower, proxymetrics.OutcomeMiss, len(serialized), "")
 		return serialized, nil
 	})
 
@@ -442,13 +451,11 @@ func (h *Handler) tryCacheRead(
 		return nil, false
 	}
 	if hit {
-		telemetry.CacheHits.WithLabelValues(tenantID, nsLabel, cmdLower).Inc()
-		if h.deps.CacheStats != nil {
-			h.deps.CacheStats.RecordHit(tenantID, dbName, collName)
-		}
+		h.recordCache(tenantID, dbName, collName, nsLabel, cmdLower, proxymetrics.OutcomeHit, len(payload), "")
 		telemetry.CacheLatency.WithLabelValues("hit").Observe(time.Since(start).Seconds())
 	} else {
-		// Miss was already counted when populate ran; ensure miss counted if load returned without that path
+		// Miss was counted in populate callback; missBytes retained for debugging only.
+		_ = missBytes
 		telemetry.CacheLatency.WithLabelValues("miss").Observe(time.Since(start).Seconds())
 	}
 	if cmdLower == "count" || cmdLower == "estimateddocumentcount" || cmdLower == "distinct" {
@@ -1037,4 +1044,13 @@ func int64SliceToA(ids []int64) bson.A {
 		a[i] = id
 	}
 	return a
+}
+
+func (h *Handler) recordCache(tenantID, db, coll, nsLabel, cmdLower string, result proxymetrics.Outcome, bytes int, bypassReason string) {
+	rec := h.deps.MetricsRecorder
+	if rec == nil {
+		// Fallback: still emit low-card counters without savings/cachestats dual path via empty recorder.
+		rec = &proxymetrics.Recorder{LegacyNS: true, CacheStats: h.deps.CacheStats}
+	}
+	rec.RecordCacheOutcome(tenantID, db, coll, nsLabel, cmdLower, result, bytes, bypassReason)
 }

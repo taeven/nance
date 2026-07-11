@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import {
+  ActivityIcon,
   AlertTriangleIcon,
   CableIcon,
   CopyIcon,
   DatabaseIcon,
   KeyRoundIcon,
   PlusIcon,
+  RefreshCwIcon,
   SettingsIcon,
   ShieldIcon,
   Trash2Icon,
@@ -20,6 +22,7 @@ import type {
   OrganizationInvite,
   OrganizationMember,
   Tenant,
+  TenantMetrics,
   Token,
 } from '~/types/accelerator'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -87,10 +90,15 @@ const api = useAcceleratorApi()
 const tenantId = computed(() => String(route.params.id || ''))
 
 /** Top-level: product work vs organization administration */
-const area = ref<'connections' | 'members' | 'org'>('connections')
+const area = ref<'insights' | 'connections' | 'members' | 'org'>('insights')
 /** Sub-panel when a connection is selected */
 const connPanel = ref<'access' | 'caching' | 'source' | 'cache-write'>('access')
 const showAddConnection = ref(false)
+
+const metrics = ref<TenantMetrics | null>(null)
+const metricsLoading = ref(false)
+const metricsError = ref('')
+const metricsWindow = ref('1h')
 
 const myRole = computed(() => tenant.value?.role || 'member')
 const canManage = computed(() => tenant.value?.canManage === true || myRole.value === 'owner' || myRole.value === 'admin')
@@ -322,15 +330,61 @@ async function onRevokeInvite(inviteId: string) {
   }
 }
 
+async function loadMetrics() {
+  if (!tenantId.value) return
+  metricsLoading.value = true
+  metricsError.value = ''
+  try {
+    metrics.value = await api.getTenantMetrics(tenantId.value, metricsWindow.value)
+  }
+  catch (e) {
+    metricsError.value = api.apiErrorMessage(e)
+    metrics.value = null
+  }
+  finally {
+    metricsLoading.value = false
+  }
+}
+
+function formatPct(v: number | null | undefined) {
+  if (v == null || Number.isNaN(v)) return '—'
+  return `${(v * 100).toFixed(1)}%`
+}
+
+function formatNum(v: number | null | undefined, digits = 0) {
+  if (v == null || Number.isNaN(v)) return '—'
+  if (Math.abs(v) >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`
+  if (Math.abs(v) >= 10_000) return `${(v / 1000).toFixed(1)}k`
+  if (digits > 0) return v.toFixed(digits)
+  return Math.round(v).toLocaleString()
+}
+
+function formatBytes(v: number | null | undefined) {
+  if (v == null || Number.isNaN(v)) return '—'
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']
+  let n = Math.max(0, v)
+  let i = 0
+  while (n >= 1024 && i < u.length - 1) {
+    n /= 1024
+    i++
+  }
+  return `${n.toFixed(i === 0 ? 0 : 1)} ${u[i]}`
+}
+
 watch(area, async (t) => {
+  if (t === 'insights') await loadMetrics()
   if (t === 'connections') await loadConnections()
   if (t === 'members') await loadMembers()
+})
+
+watch(metricsWindow, async () => {
+  if (area.value === 'insights') await loadMetrics()
 })
 
 onMounted(async () => {
   await loadTenant()
   if (tenant.value) {
-    await loadConnections()
+    await loadMetrics()
   }
 })
 
@@ -719,6 +773,10 @@ async function confirmDeleteOrg() {
       <!-- Primary navigation: product vs org admin -->
       <Tabs v-model="area" class="w-full flex-col gap-5">
         <TabsList class="h-auto w-full flex-wrap justify-start gap-1 bg-muted/50 p-1">
+          <TabsTrigger value="insights" class="gap-1.5">
+            <ActivityIcon class="size-3.5 opacity-80" />
+            Insights
+          </TabsTrigger>
           <TabsTrigger value="connections" class="gap-1.5">
             <CableIcon class="size-3.5 opacity-80" />
             Connections
@@ -732,6 +790,120 @@ async function confirmDeleteOrg() {
             Organization
           </TabsTrigger>
         </TabsList>
+
+        <!-- ========== INSIGHTS (org-wide metrics) ========== -->
+        <TabsContent value="insights" class="mt-0 flex flex-col gap-4">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 class="text-lg font-semibold tracking-tight">Insights</h2>
+              <p class="text-sm text-muted-foreground">
+                Organization-wide (all connections). Gauges lag Prometheus scrape (~15–30s).
+              </p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <Select v-model="metricsWindow">
+                <SelectTrigger class="w-[7.5rem]">
+                  <SelectValue placeholder="Window" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value="15m">15m</SelectItem>
+                    <SelectItem value="1h">1h</SelectItem>
+                    <SelectItem value="6h">6h</SelectItem>
+                    <SelectItem value="24h">24h</SelectItem>
+                    <SelectItem value="7d">7d</SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+              <Button variant="outline" size="sm" :disabled="metricsLoading" @click="loadMetrics">
+                <RefreshCwIcon class="size-3.5" :class="metricsLoading ? 'animate-spin' : ''" />
+                Refresh
+              </Button>
+            </div>
+          </div>
+
+          <Alert v-if="metricsError" variant="destructive">
+            <AlertTitle>Could not load metrics</AlertTitle>
+            <AlertDescription>{{ metricsError }}</AlertDescription>
+          </Alert>
+
+          <Alert v-else-if="metrics?.degraded">
+            <AlertTitle>Metrics degraded</AlertTitle>
+            <AlertDescription>
+              {{ metrics.note || 'Prometheus is unavailable or partially failing. Live multi-pod data requires NANCE_METRICS_PROM_URL on the control plane.' }}
+            </AlertDescription>
+          </Alert>
+
+          <div v-if="metricsLoading && !metrics" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <Skeleton v-for="i in 6" :key="i" class="h-28 w-full" />
+          </div>
+
+          <div v-else-if="metrics" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <Card>
+              <CardHeader class="pb-2">
+                <CardDescription>Hit ratio ({{ metrics.window }})</CardDescription>
+                <CardTitle class="text-2xl tabular-nums">{{ formatPct(metrics.cache.hitRatio) }}</CardTitle>
+              </CardHeader>
+              <CardContent class="text-xs text-muted-foreground">
+                {{ formatNum(metrics.cache.hits) }} hits · {{ formatNum(metrics.cache.misses) }} misses
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader class="pb-2">
+                <CardDescription>Queries saved</CardDescription>
+                <CardTitle class="text-2xl tabular-nums">{{ formatNum(metrics.cache.queriesSaved) }}</CardTitle>
+              </CardHeader>
+              <CardContent class="text-xs text-muted-foreground">
+                Cache hits over selected window
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader class="pb-2">
+                <CardDescription>Bytes from cache</CardDescription>
+                <CardTitle class="text-2xl tabular-nums">{{ formatBytes(metrics.cache.bytesFromCache) }}</CardTitle>
+              </CardHeader>
+              <CardContent class="text-xs text-muted-foreground">
+                Backend path {{ formatBytes(metrics.cache.bytesFromBackend) }}
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader class="pb-2">
+                <CardDescription>Open connections</CardDescription>
+                <CardTitle class="text-2xl tabular-nums">{{ formatNum(metrics.connections.clientAuthenticated) }}</CardTitle>
+              </CardHeader>
+              <CardContent class="text-xs text-muted-foreground">
+                Authenticated client TCP sessions (cluster sum)
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader class="pb-2">
+                <CardDescription>Commands / s</CardDescription>
+                <CardTitle class="text-2xl tabular-nums">{{ formatNum(metrics.throughput.commandsPerSecond, 1) }}</CardTitle>
+              </CardHeader>
+              <CardContent class="text-xs text-muted-foreground">
+                Rate limited {{ formatNum(metrics.throughput.rateLimitedPerSecond, 2) }}/s
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader class="pb-2">
+                <CardDescription>Backend pool</CardDescription>
+                <CardTitle class="text-2xl tabular-nums">
+                  {{ formatNum(metrics.connections.backendInUse) }}
+                  <span class="text-base font-normal text-muted-foreground">in use</span>
+                </CardTitle>
+              </CardHeader>
+              <CardContent class="text-xs text-muted-foreground">
+                {{ formatNum(metrics.connections.backendIdle) }} idle · max {{ metrics.connections.maxPerPod }}/pod
+              </CardContent>
+            </Card>
+          </div>
+
+          <p v-if="metrics" class="text-xs text-muted-foreground">
+            {{ metrics.connections.limitNote }}
+            <span v-if="metrics.asOf"> · as of {{ formatDate(metrics.asOf) }}</span>
+            <span v-if="metrics.source"> · source {{ metrics.source }}</span>
+          </p>
+        </TabsContent>
 
         <!-- ========== CONNECTIONS WORKSPACE ========== -->
         <TabsContent value="connections" class="mt-0 flex flex-col gap-0">

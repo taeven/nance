@@ -20,6 +20,7 @@ import (
 	proxyconfig "github.com/taeven/nance/accelerator/internal/proxy/config"
 	"github.com/taeven/nance/accelerator/internal/proxy/cursor"
 	"github.com/taeven/nance/accelerator/internal/proxy/handler"
+	proxymetrics "github.com/taeven/nance/accelerator/internal/proxy/metrics"
 	"github.com/taeven/nance/accelerator/internal/proxy/policy"
 	"github.com/taeven/nance/accelerator/internal/proxy/pool"
 	"github.com/taeven/nance/accelerator/internal/proxy/ratelimit"
@@ -46,7 +47,8 @@ type Server struct {
 
 	mu      sync.Mutex
 	conns   map[net.Conn]struct{}
-	tenantN map[string]int // open connections per tenant
+	tenantN map[string]int // open connections per tenant (only when MaxConnsPerTenant > 0)
+	authN   map[string]int // authenticated open connections per tenant (metrics)
 	connSeq atomic.Uint64
 	connID  atomic.Int32
 	reqID   atomic.Int32
@@ -58,11 +60,12 @@ type Server struct {
 
 // Options for constructing the proxy server (Phase 2/3 extras).
 type Options struct {
-	Cache         *cache.Coordinator
-	Policies      *policy.Engine
-	CachedCursors *cachedcursor.Store
-	CacheStats    *cachestats.Tracker
-	Limiter       *ratelimit.Limiter
+	Cache           *cache.Coordinator
+	Policies        *policy.Engine
+	CachedCursors   *cachedcursor.Store
+	CacheStats      *cachestats.Tracker
+	MetricsRecorder *proxymetrics.Recorder
+	Limiter         *ratelimit.Limiter
 	// Store is used for connection settings (auto-invalidate on write).
 	Store store.Store
 }
@@ -87,20 +90,22 @@ func New(cfg *proxyconfig.Config, log *slog.Logger, validator *auth.Validator, p
 		limiter:       o.Limiter,
 		conns:         make(map[net.Conn]struct{}),
 		tenantN:       make(map[string]int),
+		authN:         make(map[string]int),
 	}
 	s.handler = handler.New(handler.Deps{
-		Auth:          validator,
-		Pool:          pools,
-		Cursors:       cursors,
-		CachedCursors: o.CachedCursors,
-		CacheStats:    o.CacheStats,
-		Cache:         o.Cache,
-		Policies:      o.Policies,
-		Store:         o.Store,
-		Limiter:       o.Limiter,
-		Log:           log,
-		ConnID:        &s.connID,
-		DefaultBatch:  101,
+		Auth:            validator,
+		Pool:            pools,
+		Cursors:         cursors,
+		CachedCursors:   o.CachedCursors,
+		CacheStats:      o.CacheStats,
+		MetricsRecorder: o.MetricsRecorder,
+		Cache:           o.Cache,
+		Policies:        o.Policies,
+		Store:           o.Store,
+		Limiter:         o.Limiter,
+		Log:             log,
+		ConnID:          &s.connID,
+		DefaultBatch:    101,
 	})
 	s.reqID.Store(1)
 	return s
@@ -244,8 +249,13 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 		if s.cachedCursors != nil {
 			s.cachedCursors.CleanupConn(connKey)
 		}
-		if cs.Tenant != nil {
-			s.releaseTenantConn(cs.Tenant.TenantID)
+		if cs.TenantCounted {
+			tid := cs.CountedTenantID
+			if tid == "" && cs.Tenant != nil {
+				tid = cs.Tenant.TenantID
+			}
+			s.decAuthenticated(tid)
+			s.releaseTenantConn(tid)
 		}
 		s.log.Debug("client disconnected", "remote", remote, "conn", connKey)
 	}()
@@ -291,21 +301,34 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 }
 
 func (s *Server) handleMsg(ctx context.Context, conn net.Conn, cs *handler.ConnState, msg *wire.Msg) error {
-	// Per-tenant connection limit check on first successful auth is handled below
+	// Busy gauge: in-flight while handling (authenticated only).
+	if cs.Authed && cs.Tenant != nil {
+		if cs.InFlight.Add(1) == 1 {
+			telemetry.IncGaugeTenant(telemetry.ProxyClientConnectionsBusy, cs.Tenant.TenantID)
+		}
+		defer func() {
+			if cs.InFlight.Add(-1) == 0 {
+				telemetry.DecGaugeTenant(telemetry.ProxyClientConnectionsBusy, cs.Tenant.TenantID)
+			}
+		}()
+	}
+
 	replyDoc, err := s.handler.Handle(ctx, cs, msg)
 	if err != nil {
 		replyDoc = handlerErrorDoc(err)
 	}
 
-	// After auth, enforce per-tenant connection limits
+	// After auth, enforce per-tenant connection limits and authenticated gauges.
 	if cs.Authed && cs.Tenant != nil {
-		if !csHasTenantCounted(cs) {
+		if !cs.TenantCounted {
 			if !s.tryAcquireTenantConn(cs.Tenant.TenantID) {
 				replyDoc = auth.TooManyConnectionsDoc()
-				// Force disconnect after reply
 				defer conn.Close()
 			} else {
-				markTenantCounted(cs)
+				cs.TenantCounted = true
+				cs.CountedTenantID = cs.Tenant.TenantID
+				// Always track authenticated count for metrics (independent of MaxConns limit path).
+				s.incAuthenticated(cs.CountedTenantID)
 			}
 		}
 	}
@@ -402,6 +425,8 @@ func (s *Server) writeErrorMsg(conn net.Conn, requestID int32, code int32, codeN
 	return wire.WriteMsg(conn, respID, requestID, body)
 }
 
+// tryAcquireTenantConn enforces MaxConnsPerTenant when > 0.
+// When the limit is disabled (0), always allows; authenticated gauges use authN, not tenantN.
 func (s *Server) tryAcquireTenantConn(tenantID string) bool {
 	if s.cfg.MaxConnsPerTenant <= 0 {
 		return true
@@ -416,39 +441,52 @@ func (s *Server) tryAcquireTenantConn(tenantID string) bool {
 }
 
 func (s *Server) releaseTenantConn(tenantID string) {
+	if s.cfg.MaxConnsPerTenant <= 0 {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.tenantN[tenantID] > 0 {
 		s.tenantN[tenantID]--
+		if s.tenantN[tenantID] == 0 {
+			delete(s.tenantN, tenantID)
+		}
 	}
 }
 
-// tenantCounted flag stored in ConnState via a simple map on server — use a field on ConnState.
-// We add TenantCounted bool to ConnState in handler — patch via helpers.
-
-type connExtras struct {
-	tenantCounted bool
-}
-
-var connExtraMu sync.Mutex
-var connExtraMap = map[*handler.ConnState]*connExtras{}
-
-func csHasTenantCounted(cs *handler.ConnState) bool {
-	connExtraMu.Lock()
-	defer connExtraMu.Unlock()
-	ex, ok := connExtraMap[cs]
-	return ok && ex.tenantCounted
-}
-
-func markTenantCounted(cs *handler.ConnState) {
-	connExtraMu.Lock()
-	defer connExtraMu.Unlock()
-	ex, ok := connExtraMap[cs]
-	if !ok {
-		ex = &connExtras{}
-		connExtraMap[cs] = ex
+// authN tracks authenticated open connections for Prometheus (independent of MaxConns).
+func (s *Server) incAuthenticated(tenantID string) {
+	if tenantID == "" {
+		return
 	}
-	ex.tenantCounted = true
+	s.mu.Lock()
+	if s.authN == nil {
+		s.authN = make(map[string]int)
+	}
+	s.authN[tenantID]++
+	n := s.authN[tenantID]
+	s.mu.Unlock()
+	telemetry.SetGaugeTenant(telemetry.ProxyClientConnectionsAuthenticated, tenantID, float64(n))
+}
+
+func (s *Server) decAuthenticated(tenantID string) {
+	if tenantID == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.authN == nil {
+		s.mu.Unlock()
+		return
+	}
+	if s.authN[tenantID] > 0 {
+		s.authN[tenantID]--
+	}
+	n := s.authN[tenantID]
+	if n == 0 {
+		delete(s.authN, tenantID)
+	}
+	s.mu.Unlock()
+	telemetry.SetGaugeTenant(telemetry.ProxyClientConnectionsAuthenticated, tenantID, float64(n))
 }
 
 func encodeReply(doc any) (bson.Raw, error) {

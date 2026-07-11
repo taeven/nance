@@ -144,7 +144,8 @@ When SMTP password + from are unset, emails are not delivered; the dev mailer lo
 | `NANCE_MASTER_KEY` | (required) | Decrypt backend URIs |
 | `DATABASE_URL` | same as CP | Token + backend + policy lookup |
 | `NANCE_PROXY_LISTEN` | `:27018` | Mongo wire TCP listen |
-| `NANCE_PROXY_HEALTH_LISTEN` | `:9090` | `/healthz`, `/readyz`, `/metrics`, `/cache-stats` (per-collection hit/miss ratios, process-local) |
+| `NANCE_PROXY_HEALTH_LISTEN` | `:9090` | `/healthz`, `/readyz`, `/metrics`, `/cache-stats`, `/conn-stats`, `/savings-stats` |
+| `NANCE_METRICS_PROM_URL` | (empty) | Control plane only: Prometheus base URL for org metrics APIs (e.g. `http://prometheus:9090`) |
 | `NANCE_REDIS_ADDR` | `localhost:6379` | Redis `host:port` or URL (`redis://` / `rediss://` for managed TLS) |
 | `NANCE_REDIS_PASSWORD` | | Optional when not using a URL with password |
 | `NANCE_CACHE_ENABLED` | | Enable cache path when Redis is configured |

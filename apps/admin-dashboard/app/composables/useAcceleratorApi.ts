@@ -9,9 +9,11 @@ import type {
   OrganizationInvite,
   OrganizationMember,
   OrganizationSummary,
+  MetricsTimeseries,
   SavingsReport,
   StatusResponse,
   Tenant,
+  TenantMetrics,
   Token,
   User,
   PlatformSettings,
@@ -294,10 +296,33 @@ export function useAcceleratorApi() {
     )
   }
 
-  async function getSavings(tenantId: string) {
+  async function getSavings(tenantId: string, window = '1h') {
     return $fetch<SavingsReport>(`/api/tenants/${encodeURIComponent(tenantId)}/savings`, {
       headers: authHeaders(),
+      query: { window },
     })
+  }
+
+  async function getTenantMetrics(tenantId: string, window = '1h') {
+    return $fetch<TenantMetrics>(`/api/tenants/${encodeURIComponent(tenantId)}/metrics`, {
+      headers: authHeaders(),
+      query: { window },
+    })
+  }
+
+  async function getTenantMetricsTimeseries(
+    tenantId: string,
+    metric: string,
+    window = '24h',
+    step?: string,
+  ) {
+    return $fetch<MetricsTimeseries>(
+      `/api/tenants/${encodeURIComponent(tenantId)}/metrics/timeseries`,
+      {
+        headers: authHeaders(),
+        query: { metric, window, ...(step ? { step } : {}) },
+      },
+    )
   }
 
   async function checkHealth() {
@@ -343,6 +368,8 @@ export function useAcceleratorApi() {
     reenableToken,
     invalidate,
     getSavings,
+    getTenantMetrics,
+    getTenantMetricsTimeseries,
     checkHealth,
     apiErrorMessage,
   }

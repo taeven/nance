@@ -10,6 +10,7 @@ import (
 	"github.com/taeven/nance/accelerator/internal/controlplane/store"
 	"github.com/taeven/nance/accelerator/internal/crypto"
 	proxyconfig "github.com/taeven/nance/accelerator/internal/proxy/config"
+	"github.com/taeven/nance/accelerator/internal/telemetry"
 
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -18,8 +19,10 @@ import (
 )
 
 // tenantClient is one backend mongo.Client with idle / in-use tracking for eviction.
+// Map key is connectionID; TenantID is stored for metrics labels.
 type tenantClient struct {
 	client   *mongo.Client
+	tenantID string
 	lastUsed time.Time
 	refs     int // outstanding Get() without Release(); must be 0 to evict
 }
@@ -32,9 +35,10 @@ type Manager struct {
 	cfg    *proxyconfig.Config
 	log    *slog.Logger
 
-	mu      sync.Mutex
-	clients map[string]*tenantClient
-	sf      singleflight.Group
+	mu           sync.Mutex
+	clients      map[string]*tenantClient
+	sf           singleflight.Group
+	gaugeTenants map[string]struct{} // tenants currently exposed on backend gauges
 
 	// idleTimeout: close tenant clients unused for this long (0 = disable eviction).
 	idleTimeout time.Duration
@@ -128,6 +132,7 @@ func (m *Manager) Get(ctx context.Context, connectionID string) (*mongo.Client, 
 		e.lastUsed = time.Now()
 		c := e.client
 		m.mu.Unlock()
+		m.recomputeBackendGauges()
 		return c, nil
 	}
 	m.mu.Unlock()
@@ -139,11 +144,12 @@ func (m *Manager) Get(ctx context.Context, connectionID string) (*mongo.Client, 
 			e.lastUsed = time.Now()
 			c := e.client
 			m.mu.Unlock()
+			m.recomputeBackendGauges()
 			return c, nil
 		}
 		m.mu.Unlock()
 
-		client, err := m.connect(ctx, connectionID)
+		client, tid, err := m.connect(ctx, connectionID)
 		if err != nil {
 			return nil, err
 		}
@@ -156,15 +162,21 @@ func (m *Manager) Get(ctx context.Context, connectionID string) (*mongo.Client, 
 			c := existing.client
 			m.mu.Unlock()
 			_ = client.Disconnect(context.Background())
+			m.recomputeBackendGauges()
 			return c, nil
 		}
 		m.clients[connectionID] = &tenantClient{
 			client:   client,
+			tenantID: tid,
 			lastUsed: time.Now(),
 			refs:     1,
 		}
 		m.mu.Unlock()
-		m.log.Info("backend client created", "connection", connectionID)
+		m.log.Info("backend client created", "connection", connectionID, "tenant", tid)
+		if tid != "" {
+			telemetry.ProxyBackendClientsCreated.WithLabelValues(tid).Inc()
+		}
+		m.recomputeBackendGauges()
 		return client, nil
 	})
 	if err != nil {
@@ -180,27 +192,30 @@ func (m *Manager) Release(connectionID string) {
 		return
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	e, ok := m.clients[connectionID]
 	if !ok || e == nil {
+		m.mu.Unlock()
 		return
 	}
 	if e.refs > 0 {
 		e.refs--
 	}
 	e.lastUsed = time.Now()
+	m.mu.Unlock()
+	m.recomputeBackendGauges()
 }
 
-func (m *Manager) connect(ctx context.Context, connectionID string) (*mongo.Client, error) {
+func (m *Manager) connect(ctx context.Context, connectionID string) (*mongo.Client, string, error) {
 	conn, err := m.store.GetConnection(ctx, connectionID)
 	if err != nil {
-		return nil, fmt.Errorf("connection lookup: %w", err)
+		return nil, "", fmt.Errorf("connection lookup: %w", err)
 	}
+	tenantID := conn.TenantID
 
 	// AAD is tenant_id (same as control-plane encryption).
 	plaintext, err := m.crypto.Decrypt(conn.URICiphertext, conn.Nonce, conn.TenantID)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt connection uri: %w", err)
+		return nil, "", fmt.Errorf("decrypt connection uri: %w", err)
 	}
 	uri := string(plaintext)
 
@@ -227,17 +242,17 @@ func (m *Manager) connect(ctx context.Context, connectionID string) (*mongo.Clie
 
 	client, err := mongo.Connect(connectCtx, opts)
 	if err != nil {
-		return nil, fmt.Errorf("mongo connect: %w", err)
+		return nil, "", fmt.Errorf("mongo connect: %w", err)
 	}
 
 	pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer pingCancel()
 	if err := client.Ping(pingCtx, readpref.Primary()); err != nil {
 		_ = client.Disconnect(context.Background())
-		return nil, fmt.Errorf("backend ping: %w", err)
+		return nil, "", fmt.Errorf("backend ping: %w", err)
 	}
 
-	return client, nil
+	return client, tenantID, nil
 }
 
 // evictIdle disconnects tenant clients with refs==0 and lastUsed older than idleTimeout.
@@ -247,8 +262,9 @@ func (m *Manager) evictIdle(ctx context.Context) {
 	}
 	now := time.Now()
 	type doomed struct {
-		id     string
-		client *mongo.Client
+		id       string
+		tenantID string
+		client   *mongo.Client
 	}
 	var toClose []doomed
 
@@ -264,24 +280,28 @@ func (m *Manager) evictIdle(ctx context.Context) {
 		if now.Sub(e.lastUsed) < m.idleTimeout {
 			continue
 		}
-		toClose = append(toClose, doomed{id: id, client: e.client})
+		toClose = append(toClose, doomed{id: id, tenantID: e.tenantID, client: e.client})
 		delete(m.clients, id)
 	}
 	m.mu.Unlock()
 
 	for _, d := range toClose {
+		if d.tenantID != "" {
+			telemetry.ProxyBackendClientsEvicted.WithLabelValues(d.tenantID).Inc()
+		}
 		if d.client == nil {
-			m.log.Info("evicted idle backend client", "tenant", d.id, "idle_timeout", m.idleTimeout.String())
+			m.log.Info("evicted idle backend client", "connection", d.id, "tenant", d.tenantID, "idle_timeout", m.idleTimeout.String())
 			continue
 		}
 		discCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		if err := d.client.Disconnect(discCtx); err != nil {
-			m.log.Warn("idle backend disconnect error", "tenant", d.id, "error", err)
+			m.log.Warn("idle backend disconnect error", "connection", d.id, "tenant", d.tenantID, "error", err)
 		} else {
-			m.log.Info("evicted idle backend client", "tenant", d.id, "idle_timeout", m.idleTimeout.String())
+			m.log.Info("evicted idle backend client", "connection", d.id, "tenant", d.tenantID, "idle_timeout", m.idleTimeout.String())
 		}
 		cancel()
 	}
+	m.recomputeBackendGauges()
 }
 
 // EvictIdleForTest runs one eviction pass (unit tests).
@@ -333,5 +353,89 @@ func (m *Manager) RefsForTest(tenantID string) int {
 func (m *Manager) InjectClientForTest(tenantID string, client *mongo.Client, lastUsed time.Time, refs int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.clients[tenantID] = &tenantClient{client: client, lastUsed: lastUsed, refs: refs}
+	m.clients[tenantID] = &tenantClient{client: client, tenantID: tenantID, lastUsed: lastUsed, refs: refs}
+}
+
+// SnapshotConn returns process-local backend pool stats for /conn-stats.
+type BackendSnap struct {
+	ConnectionID string `json:"connectionId"`
+	TenantID     string `json:"tenantId"`
+	Refs         int    `json:"refs"`
+	State        string `json:"state"` // in_use | idle
+}
+
+func (m *Manager) Snapshot() []BackendSnap {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]BackendSnap, 0, len(m.clients))
+	for id, e := range m.clients {
+		if e == nil {
+			continue
+		}
+		st := "idle"
+		if e.refs > 0 {
+			st = "in_use"
+		}
+		out = append(out, BackendSnap{ConnectionID: id, TenantID: e.tenantID, Refs: e.refs, State: st})
+	}
+	return out
+}
+
+func (m *Manager) recomputeBackendGauges() {
+	m.mu.Lock()
+	// aggregate by tenant
+	type acc struct{ inUse, idle int }
+	by := map[string]*acc{}
+	for _, e := range m.clients {
+		if e == nil || e.tenantID == "" {
+			continue
+		}
+		a := by[e.tenantID]
+		if a == nil {
+			a = &acc{}
+			by[e.tenantID] = a
+		}
+		if e.refs > 0 {
+			a.inUse++
+		} else {
+			a.idle++
+		}
+	}
+	// copy keys for set outside lock values
+	type pair struct {
+		tid         string
+		inUse, idle int
+	}
+	pairs := make([]pair, 0, len(by))
+	for tid, a := range by {
+		pairs = append(pairs, pair{tid, a.inUse, a.idle})
+	}
+	m.mu.Unlock()
+
+	seen := map[string]struct{}{}
+	for _, p := range pairs {
+		seen[p.tid] = struct{}{}
+		if p.inUse > 0 {
+			telemetry.ProxyBackendClients.WithLabelValues(p.tid, "in_use").Set(float64(p.inUse))
+		} else {
+			_ = telemetry.ProxyBackendClients.DeleteLabelValues(p.tid, "in_use")
+		}
+		if p.idle > 0 {
+			telemetry.ProxyBackendClients.WithLabelValues(p.tid, "idle").Set(float64(p.idle))
+		} else {
+			_ = telemetry.ProxyBackendClients.DeleteLabelValues(p.tid, "idle")
+		}
+	}
+	m.mu.Lock()
+	if m.gaugeTenants == nil {
+		m.gaugeTenants = make(map[string]struct{})
+	}
+	for tid := range m.gaugeTenants {
+		if _, ok := seen[tid]; !ok {
+			_ = telemetry.ProxyBackendClients.DeleteLabelValues(tid, "in_use")
+			_ = telemetry.ProxyBackendClients.DeleteLabelValues(tid, "idle")
+		}
+	}
+	m.gaugeTenants = seen
+	m.mu.Unlock()
 }

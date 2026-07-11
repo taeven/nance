@@ -124,8 +124,62 @@ export interface InvalidateResponse {
 
 export interface SavingsReport {
   tenantId: string
+  window?: string
+  source?: string
+  degraded?: boolean
   note?: string
+  hits?: number | null
+  misses?: number | null
+  hitRatio?: number | null
+  queriesSaved?: number | null
+  bytesFromCache?: number | null
+  bytesFromBackend?: number | null
   suggestedQueries?: string[]
+}
+
+export interface TenantMetrics {
+  tenantId: string
+  asOf: string
+  window: string
+  source: string
+  degraded: boolean
+  note?: string
+  errors?: { field: string, error: string }[]
+  connections: {
+    clientAuthenticated: number | null
+    clientBusy?: number | null
+    backendInUse: number | null
+    backendIdle: number | null
+    maxPerPod: number
+    limitNote: string
+  }
+  cache: {
+    hits: number | null
+    misses: number | null
+    bypass: number | null
+    hitRatio: number | null
+    bytesFromCache: number | null
+    bytesFromBackend: number | null
+    queriesSaved: number | null
+  }
+  throughput: {
+    commandsPerSecond: number | null
+    rateLimitedPerSecond: number | null
+  }
+  collections?: {
+    top: unknown[]
+    note?: string
+  }
+}
+
+export interface MetricsTimeseries {
+  metric: string
+  window: string
+  step: string
+  points: { t: number, v: number | null }[]
+  source: string
+  degraded: boolean
+  note?: string
 }
 
 export interface PlatformSettings {

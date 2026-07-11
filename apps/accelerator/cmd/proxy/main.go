@@ -19,10 +19,12 @@ import (
 	proxyconfig "github.com/taeven/nance/accelerator/internal/proxy/config"
 	"github.com/taeven/nance/accelerator/internal/proxy/cursor"
 	"github.com/taeven/nance/accelerator/internal/proxy/health"
+	proxymetrics "github.com/taeven/nance/accelerator/internal/proxy/metrics"
 	"github.com/taeven/nance/accelerator/internal/proxy/policy"
 	"github.com/taeven/nance/accelerator/internal/proxy/pool"
 	"github.com/taeven/nance/accelerator/internal/proxy/ratelimit"
 	"github.com/taeven/nance/accelerator/internal/proxy/region"
+	"github.com/taeven/nance/accelerator/internal/proxy/savings"
 	"github.com/taeven/nance/accelerator/internal/proxy/server"
 )
 
@@ -91,19 +93,28 @@ func main() {
 	cachedCursors := cachedcursor.NewStore(cfg.CursorIdleTimeout, cfg.CachedCursorMaxBytes)
 	limiter := ratelimit.New(cfg.TenantQPS, cfg.TenantBurst)
 	cacheStats := cachestats.NewTracker()
+	savingsTracker := savings.NewTracker()
+	metricsRec := &proxymetrics.Recorder{
+		CacheStats: cacheStats,
+		Savings:    savingsTracker,
+		LegacyNS:   true, // dual-write legacy ns-labeled counters during migration
+	}
 	proxySrv := server.New(cfg, logger, validator, pools, cursors, server.Options{
-		Cache:         cacheCoord,
-		Policies:      polEngine,
-		CacheStats:    cacheStats,
-		CachedCursors: cachedCursors,
-		Limiter:       limiter,
-		Store:         pgStore,
+		Cache:           cacheCoord,
+		Policies:        polEngine,
+		CacheStats:      cacheStats,
+		MetricsRecorder: metricsRec,
+		CachedCursors:   cachedCursors,
+		Limiter:         limiter,
+		Store:           pgStore,
 	})
 
 	// HTTP health/metrics sidecar
 	hs := &health.Server{
 		Addr:       cfg.HealthAddr,
 		CacheStats: cacheStats,
+		Pool:       pools,
+		Savings:    savingsTracker,
 		ReadyFn: func(c context.Context) error {
 			// Ready if we can ping postgres (Redis optional — fail-open)
 			_, err := pgStore.ListTenants(c)

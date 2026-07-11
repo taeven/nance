@@ -32,6 +32,7 @@ type Handlers struct {
 	tokens      *service.TokenService
 	auth        *service.AuthService
 	orgs        *service.OrgService
+	metrics     *service.MetricsQuerier
 	platform    PlatformPublic
 }
 
@@ -58,6 +59,14 @@ func NewHandlers(
 		orgs:        orgs,
 		platform:    platform,
 	}
+}
+
+// WithMetrics attaches the Prometheus-backed metrics querier (optional).
+func (h *Handlers) WithMetrics(q *service.MetricsQuerier) *Handlers {
+	if h != nil {
+		h.metrics = q
+	}
+	return h
 }
 
 // GetPlatformSettings returns public instance configuration for the dashboard.
@@ -920,14 +929,73 @@ func (h *Handlers) SavingsReport(w http.ResponseWriter, r *http.Request) {
 		mapAuthErr(w, err)
 		return
 	}
+	window := r.URL.Query().Get("window")
+	q := h.metrics
+	if q == nil {
+		q = service.NewMetricsQuerierFromEnv()
+	}
+	snap, err := q.Snapshot(r.Context(), tenantID, window)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Backwards-compatible savings subset.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tenantId": tenantID,
-		"note":     "Proxy exposes live counters via /metrics (nance_cache_*). Aggregate with Prometheus/Grafana.",
-		"suggestedQueries": []string{
-			"sum(rate(nance_cache_hits_total{tenant=\"" + tenantID + "\"}[1d]))",
-			"sum(rate(nance_cache_misses_total{tenant=\"" + tenantID + "\"}[1d]))",
-		},
+		"tenantId":         snap.TenantID,
+		"window":           snap.Window,
+		"source":           snap.Source,
+		"degraded":         snap.Degraded,
+		"note":             snap.Note,
+		"hits":             snap.Cache.Hits,
+		"misses":           snap.Cache.Misses,
+		"hitRatio":         snap.Cache.HitRatio,
+		"queriesSaved":     snap.Cache.QueriesSaved,
+		"bytesFromCache":   snap.Cache.BytesFromCache,
+		"bytesFromBackend": snap.Cache.BytesFromBackend,
 	})
+}
+
+// TenantMetrics returns org-scoped connection + cache metrics (PromQL-backed).
+func (h *Handlers) TenantMetrics(w http.ResponseWriter, r *http.Request) {
+	tenantID := chi.URLParam(r, "tenantId")
+	if err := h.ensureTenantAccess(r, tenantID); err != nil {
+		mapAuthErr(w, err)
+		return
+	}
+	q := h.metrics
+	if q == nil {
+		q = service.NewMetricsQuerierFromEnv()
+	}
+	snap, err := q.Snapshot(r.Context(), tenantID, r.URL.Query().Get("window"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
+}
+
+// TenantMetricsTimeseries returns a PromQL range series for charting.
+func (h *Handlers) TenantMetricsTimeseries(w http.ResponseWriter, r *http.Request) {
+	tenantID := chi.URLParam(r, "tenantId")
+	if err := h.ensureTenantAccess(r, tenantID); err != nil {
+		mapAuthErr(w, err)
+		return
+	}
+	metric := r.URL.Query().Get("metric")
+	if metric == "" {
+		writeError(w, http.StatusBadRequest, "metric query param required")
+		return
+	}
+	q := h.metrics
+	if q == nil {
+		q = service.NewMetricsQuerierFromEnv()
+	}
+	ts, err := q.Timeseries(r.Context(), tenantID, metric, r.URL.Query().Get("window"), r.URL.Query().Get("step"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, ts)
 }
 
 // ===== Tokens (proxy access for a source connection) =====

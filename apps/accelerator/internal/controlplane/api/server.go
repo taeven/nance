@@ -26,7 +26,8 @@ func NewServer(
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 
-	h := handlers.NewHandlers(ts, cs, ps, toks, authSvc, orgSvc, platform)
+	h := handlers.NewHandlers(ts, cs, ps, toks, authSvc, orgSvc, platform).
+		WithMetrics(service.NewMetricsQuerierFromEnv())
 
 	// Probe endpoints without access logs (k8s/LB scrapes).
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -99,6 +100,8 @@ func NewServer(
 				r.Post("/tenants/{tenantId}/connections/{connectionId}/invalidate", h.Invalidate)
 
 				r.Get("/tenants/{tenantId}/savings", h.SavingsReport)
+				r.Get("/tenants/{tenantId}/metrics", h.TenantMetrics)
+				r.Get("/tenants/{tenantId}/metrics/timeseries", h.TenantMetricsTimeseries)
 			})
 		})
 	})
