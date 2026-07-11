@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net"
 	"net/smtp"
+	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -20,13 +22,22 @@ type LogMailer struct {
 	Log *slog.Logger
 }
 
+var codeRegexp = regexp.MustCompile(`\b\d{6}\b`)
+
 func (m *LogMailer) Send(_ context.Context, to, subject, body string) error {
 	log := m.Log
 	if log == nil {
 		log = slog.Default()
 	}
-	// Never log body — OTP and other secrets may be present.
-	log.Info("email (dev mailer)", "to", to, "subject", subject, "bodyBytes", len(body))
+	if strings.ToLower(os.Getenv("ENVIRONMENT")) == "local" {
+		if match := codeRegexp.FindString(body); match != "" {
+			log.Info("email (dev mailer)", "to", to, "subject", subject, "code", match)
+		} else {
+			log.Info("email (dev mailer)", "to", to, "subject", subject, "body", body)
+		}
+	} else {
+		log.Info("email (dev mailer)", "to", to, "subject", subject, "bodyBytes", len(body))
+	}
 	return nil
 }
 
